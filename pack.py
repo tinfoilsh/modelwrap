@@ -1,6 +1,7 @@
 import os
 import sys
 import subprocess
+import json
 import uuid
 import shutil
 from hashlib import sha256
@@ -30,6 +31,44 @@ if "@" not in model:
 
 model_name, model_commit = model.split("@")
 model_dir = os.path.join(cache_dir, model.replace("@", "/") )
+
+attributes = {
+    "NAME": f"{model_name}@{model_commit}",
+    "ARCH": "transformer",
+    "FAMILY": "llama",
+    # "FORMAT": "safetensors",
+    # "PARAMSIZE": 16,
+    # "PRECISION": "bf16",
+    # "QUANTIZATION": "awq",
+    "CONFIG": "*config.json",
+    "MODEL": "*.safetensors",
+    "CODE": "*.py",
+    "DOC": "*.md",
+}
+
+config_file = os.path.join(model_dir, "config.json")
+with open(config_file, "r") as f:
+    config = json.load(f)
+    if "model_type" in config:
+       attributes["FAMILY"] = config["model_type"]
+
+modelfile = ""
+for k, v in attributes.items():
+    modelfile += f"{k} {v}\n"
+
+output_model_dir = os.path.join(output_dir, model_name)
+if not os.path.exists(output_model_dir):
+    os.makedirs(output_model_dir)
+
+modelfile_name = os.path.join(output_dir, model_name, model_commit+".modelfile")
+print(f"Writing modelfile to {modelfile_name}")
+with open(modelfile_name, "w") as f:
+    f.write(modelfile)
+
+registry = "example.com"
+os.system(f"modctl build -t {registry}/models/{model_name.lower()}:{model_commit} -f {modelfile_name} {model_dir}")
+
+exit(0)
 
 print(f"Downloading {model} to {model_dir}")
 
