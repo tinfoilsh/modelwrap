@@ -63,7 +63,7 @@ if not os.path.exists(mpk_file):
         model_dir
     ]
     print(f"Creating EROFS image {mpk_file}")
-    subprocess.run(mkfs_cmd)
+    subprocess.run(mkfs_cmd, check=True)
     os.rename(mpk_file+".tmp", mpk_file)
 else:
     print(f"Using existing EROFS image {mpk_file}")
@@ -89,7 +89,7 @@ if not os.path.exists(info_file):
         mpk_file, # hash dev
     ]
     print(f"Running veritysetup on {mpk_file}")
-    subprocess.run(veritysetup_cmd)
+    subprocess.run(veritysetup_cmd, check=True)
 
     if not os.path.exists(info_file):
         raise Exception(f"Failed to create dm-verity info file {info_file}")
