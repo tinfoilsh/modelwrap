@@ -23,10 +23,11 @@ if not os.path.exists(output_dir):
 
 if "@" not in model:
     api = HfApi()
-    refs = api.list_repo_refs(model)
-    latest_commit = refs.branches[0].target_commit
-    print(f"Found latest commit for {model} -> {latest_commit}")
-    model = f"{model}@{latest_commit}"
+    info = api.model_info(model)
+    if not info.sha:
+        raise Exception(f"Could not resolve HEAD commit for {model}. Please specify commit explicitly: MODEL={model}@<commit>")
+    print(f"Resolved {model} default branch HEAD -> {info.sha}")
+    model = f"{model}@{info.sha}"
 
 model_name, model_commit = model.split("@")
 model_dir = os.path.join(cache_dir, model.replace("@", "/") )
