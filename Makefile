@@ -4,7 +4,7 @@ clean:
 	rm -rf output cache
 
 build:
-	docker build -t tinfoil-modelpack .
+	docker build -t tinfoil-modelwrap .
 
 pack:
 	docker run --rm -it \
@@ -12,7 +12,7 @@ pack:
 		-v /opt/tinfoil/hfmodels:/output \
 		-e HF_TOKEN=${HF_TOKEN} \
 		-e MODEL=$(word 2,$(MAKECMDGOALS)) \
-		tinfoil-modelpack
+		tinfoil-modelwrap
 
 %:
 	@:
