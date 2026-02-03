@@ -1,4 +1,4 @@
-include .env
+-include .env
 
 clean:
 	rm -rf output cache
@@ -9,7 +9,7 @@ build:
 pack:
 	docker run --rm -it \
 		-v $(shell pwd)/cache:/cache \
-		-v /opt/tinfoil/hfmodels:/output \
+		-v $(shell pwd)/output:/output \
 		-e HF_TOKEN=${HF_TOKEN} \
 		-e MODEL=$(word 2,$(MAKECMDGOALS)) \
 		tinfoil-modelwrap
