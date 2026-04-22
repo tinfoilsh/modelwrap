@@ -8,6 +8,7 @@ from huggingface_hub import snapshot_download, HfApi
 
 cache_dir = os.getenv("CACHE_DIR") or "cache"
 output_dir = os.getenv("OUTPUT_DIR") or "output"
+hf_token = os.getenv("HF_TOKEN")
 
 model = os.getenv("MODEL")
 if not model:
@@ -22,7 +23,7 @@ if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 
 if "@" not in model:
-    api = HfApi()
+    api = HfApi(token=hf_token)
     info = api.model_info(model)
     if not info.sha:
         raise Exception(f"Could not resolve HEAD commit for {model}. Please specify commit explicitly: MODEL={model}@<commit>")
@@ -37,7 +38,7 @@ print(f"Downloading {model} to {model_dir}")
 snapshot_download(
     model_name, 
     local_dir=model_dir,
-    token=os.getenv("HF_TOKEN"),
+    token=hf_token,
     revision=model_commit,
 )
 

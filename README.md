@@ -16,6 +16,7 @@ docker run --rm -it \
 Notes:
 - `MODEL` should include an explicit `@revision` (commit hash) for reproducible builds.
 - If `@revision` is omitted, modelwrap resolves the current HEAD commit, which may change over time.
+- Set `HF_TOKEN` when accessing gated or private Hugging Face models.
 
 `modelwrap` emits two files in the output directory:
 
