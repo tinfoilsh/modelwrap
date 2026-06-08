@@ -6,14 +6,62 @@ import shutil
 from hashlib import sha256
 from huggingface_hub import snapshot_download, HfApi
 
+def parse_info_file(info_file):
+    with open(info_file, "r") as f:
+        raw_info = f.read().strip()
+
+    parts = raw_info.split("_")
+    if len(parts) != 3:
+        raise Exception(
+            f"Invalid info file {info_file}: expected ROOTHASH_OFFSET_VERITYUUID"
+        )
+
+    root_hash, offset, verity_uuid = parts
+    if len(root_hash) != 64 or any(c not in "0123456789abcdef" for c in root_hash):
+        raise Exception(f"Invalid root hash in {info_file}: {root_hash}")
+    if not offset.isdigit():
+        raise Exception(f"Invalid hash offset in {info_file}: {offset}")
+    try:
+        uuid.UUID(verity_uuid)
+    except ValueError as err:
+        raise Exception(f"Invalid verity UUID in {info_file}: {verity_uuid}") from err
+
+    return raw_info, root_hash, offset, verity_uuid
+
+
+def verify_verity(mpk_file, info_file):
+    raw_info, root_hash, offset, _ = parse_info_file(info_file)
+    if not os.path.exists(mpk_file):
+        raise Exception(f"MWP artifact not found: {mpk_file}")
+
+    verify_cmd = [
+        "veritysetup",
+        f"--hash-offset={offset}",
+        "verify",
+        mpk_file,  # data dev
+        mpk_file,  # hash dev
+        root_hash,
+    ]
+    print(f"Verifying dm-verity artifact {mpk_file}")
+    subprocess.run(verify_cmd, check=True)
+    print("Verification OK.")
+    return raw_info
+
+
 cache_dir = os.getenv("CACHE_DIR") or "cache"
 output_dir = os.getenv("OUTPUT_DIR") or "output"
 hf_token = os.getenv("HF_TOKEN")
+verify_after_pack = os.getenv("VERIFY") == "1"
+
+args = sys.argv[1:]
+if "--verify" in args:
+    verify_after_pack = True
+    args.remove("--verify")
 
 model = os.getenv("MODEL")
 if not model:
-    if len(sys.argv) >= 2:
-        model = sys.argv[1]
+    if len(args) >= 1:
+        model = args[0]
     else:
         raise Exception("MODEL environment variable not set")
 
@@ -100,6 +148,11 @@ if not os.path.exists(info_file):
         f.write(f"_{offset}_{verity_uuid}")
 else:
     print(f"dm-verity volume already exists at {mpk_file}")
+
+if verify_after_pack:
+    verify_verity(mpk_file, info_file)
+else:
+    print("Skipping dm-verity verification. Pass --verify or set VERIFY=1 to verify cached artifacts.")
 
 with open(info_file, "r") as f:
     print(f.read())
