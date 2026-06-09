@@ -16,4 +16,4 @@ ENV OUTPUT_DIR="/output"
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["python3", "pack.py"]
+ENTRYPOINT ["python3", "pack.py"]

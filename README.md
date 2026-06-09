@@ -10,13 +10,26 @@ docker run --rm -it \
   -v $(pwd)/output:/output \
   -e HF_TOKEN="${HF_TOKEN}" \
   -e MODEL=meta-llama/Llama-3.2-1B@4e20de362430cd3b72f300e6b0f18e50e7166e08 \
-  ghcr.io/tinfoilsh/modelwrap
+  ghcr.io/tinfoilsh/modelwrap@sha256:<digest>
 ```
 
 Notes:
 - `MODEL` should include an explicit `@revision` (commit hash) for reproducible builds.
 - If `@revision` is omitted, modelwrap resolves the current HEAD commit, which may change over time.
 - Set `HF_TOKEN` when accessing gated or private Hugging Face models.
+- Pass `--verify` to run `veritysetup verify` after packing or reusing cached output.
+
+To verify during the same run:
+
+```bash
+docker run --rm -it \
+  -v $(pwd)/cache:/cache \
+  -v $(pwd)/output:/output \
+  -e HF_TOKEN="${HF_TOKEN}" \
+  -e MODEL=meta-llama/Llama-3.2-1B@4e20de362430cd3b72f300e6b0f18e50e7166e08 \
+  ghcr.io/tinfoilsh/modelwrap@sha256:<digest> \
+  --verify
+```
 
 `modelwrap` emits two files in the output directory:
 
