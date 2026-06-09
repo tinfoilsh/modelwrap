@@ -2,11 +2,12 @@ import os
 import argparse
 import base64
 import hashlib
-import hmac
 import subprocess
 import uuid
 import shutil
 from hashlib import sha256
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from huggingface_hub import snapshot_download, HfApi
 
 VERITY_FORMAT = "1"
@@ -23,16 +24,13 @@ EMWP_PARTITION_START_SECTOR = 2048
 EMWP_GPT_TRAILING_SECTORS = 40
 
 
-def hkdf_sha256(ikm, salt, info, length):
-    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
-    okm = b""
-    previous = b""
-    counter = 1
-    while len(okm) < length:
-        previous = hmac.new(prk, previous + info + bytes([counter]), hashlib.sha256).digest()
-        okm += previous
-        counter += 1
-    return okm[:length]
+def derive_emwp_key(master_key, salt):
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=64,
+        salt=salt,
+        info=EMWP_KEY_DERIVE_INFO,
+    ).derive(master_key)
 
 
 def hash_model_dir(model_dir):
@@ -103,12 +101,7 @@ def encrypt_emwp(mwp_file, emwp_file, root_hash, part_uuid, key_file=None):
     mapper_name = "modelwrap-emwp-" + root_hash[:16]
 
     master_key = emwp_master_key(key_file)
-    dm_key = hkdf_sha256(
-        master_key,
-        f"{root_hash}_{part_uuid}".encode(),
-        EMWP_KEY_DERIVE_INFO,
-        64,
-    )
+    dm_key = derive_emwp_key(master_key, f"{root_hash}_{part_uuid}".encode())
 
     for path in (tmp_file, dm_key_file):
         if os.path.exists(path):
@@ -170,12 +163,7 @@ def verify_emwp(emwp_file, info_file, key_file_override=None):
     sectors = size // GPT_SECTOR_SIZE - EMWP_PARTITION_START_SECTOR - EMWP_GPT_TRAILING_SECTORS
     key_file = emwp_file + ".key.tmp"
     mapper_name = "modelwrap-emwp-verify-" + root_hash[:16]
-    dm_key = hkdf_sha256(
-        emwp_master_key(key_file_override),
-        f"{root_hash}_{part_uuid}".encode(),
-        EMWP_KEY_DERIVE_INFO,
-        64,
-    )
+    dm_key = derive_emwp_key(emwp_master_key(key_file_override), f"{root_hash}_{part_uuid}".encode())
 
     try:
         write_key_file(key_file, dm_key)
