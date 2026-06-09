@@ -6,6 +6,11 @@ import shutil
 from hashlib import sha256
 from huggingface_hub import snapshot_download, HfApi
 
+VERITY_FORMAT = "1"
+VERITY_HASH = "sha256"
+VERITY_DATA_BLOCK_SIZE = "4096"
+VERITY_HASH_BLOCK_SIZE = "4096"
+
 def parse_info_file(info_file):
     with open(info_file, "r") as f:
         raw_info = f.read().strip()
@@ -36,6 +41,10 @@ def verify_verity(mpk_file, info_file):
 
     verify_cmd = [
         "veritysetup",
+        f"--format={VERITY_FORMAT}",
+        f"--hash={VERITY_HASH}",
+        f"--data-block-size={VERITY_DATA_BLOCK_SIZE}",
+        f"--hash-block-size={VERITY_HASH_BLOCK_SIZE}",
         f"--hash-offset={offset}",
         "verify",
         mpk_file,  # data dev
@@ -130,6 +139,10 @@ if not os.path.exists(info_file):
 
     veritysetup_cmd = [
         "veritysetup",
+        f"--format={VERITY_FORMAT}",
+        f"--hash={VERITY_HASH}",
+        f"--data-block-size={VERITY_DATA_BLOCK_SIZE}",
+        f"--hash-block-size={VERITY_HASH_BLOCK_SIZE}",
         f"--salt={sha256(model.encode()).hexdigest()}",
         f"--uuid={verity_uuid}",
         f"--hash-offset={offset}",
