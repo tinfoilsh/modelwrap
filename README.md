@@ -2,6 +2,8 @@
 
 Builds reproducible dm-verity EROFS images of Hugging Face models. Learn more about how this works on the [Tinfoil blog](https://tinfoil.sh/blog/2026-02-03-proving-model-identity).
 
+For the artifact format, trust assumptions, and EMWP cryptographic parameters, see [SPEC.md](SPEC.md).
+
 ## Usage
 
 ```bash
