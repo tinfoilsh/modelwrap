@@ -6,6 +6,10 @@ The trust assumptions are: artifact bytes are *untrusted*; at runtime, identity 
 
 Modelwrap's verifiability is based on *reproducibility*, not attested provenance: artifacts are bit-for-bit reproducible, and the Modelwrap root hash is derived deterministically. An auditor can independently recompute the root hash from the model weights, for example from a pinned Hugging Face revision.
 
+## Reproducibility and Packer Versioning
+
+Artifact bytes, and therefore root hashes, are reproducible with respect to a specific digest-pinned packer image: the EROFS encoder and dm-verity tooling contribute to the output bytes, so a toolchain upgrade (e.g. a new `erofs-utils` version) can produce a different root hash for the same input model. This is not a format change and requires no version field in the artifact: existing artifacts remain valid and mountable because consumers act only on the attested reference, never on tool versions. An auditor recomputing a root hash must use the same packer image digest that produced the artifact.
+
 ## MWP Format
 
 An MWP format is:

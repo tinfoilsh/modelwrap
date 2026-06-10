@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      # Run checks in the same digest-pinned Go image the release builds with.
+      - name: Format, vet, and unit tests
+        run: |
+          set -euo pipefail
+          GO_IMAGE="$(sed -n 's/^FROM \(golang:[^ ]*\) AS build$/\1/p' Dockerfile)"
+          docker run --rm -v "$PWD:/src" -w /src -e GOFLAGS=-buildvcs=false \
+            "${GO_IMAGE}" \
+            sh -c 'test -z "$(gofmt -l .)" && go vet ./... && go vet -tags=integration ./... && go test ./...'
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      # Builds the packer image, runs the pack->unwrap round-trip
+      # integration test inside it, then smoke-tests the CLI entrypoint.
+      - name: End-to-end test
+        run: bash test/e2e.sh

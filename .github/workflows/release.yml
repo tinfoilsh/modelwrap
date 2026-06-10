@@ -13,7 +13,7 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -43,12 +43,38 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
       - name: Build and push Docker image
+        id: push
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5.4.0
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          # The packer pins x86-only tool versions (e.g. gdisk).
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Build the launcher CLI (linux/amd64 only, like everything else)
+      # with the just-pushed image digest baked in, so installed binaries
+      # always run the matching pinned packer image.
+      - name: Build CLI binary
+        run: |
+          set -euo pipefail
+          IMAGE_REF="${REGISTRY}/${IMAGE_NAME}@${{ steps.push.outputs.digest }}"
+          GO_IMAGE="$(sed -n 's/^FROM \(golang:[^ ]*\) AS build$/\1/p' Dockerfile)"
+          mkdir -p dist
+          docker run --rm -v "$PWD:/src" -w /src \
+            -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=amd64 -e GOFLAGS=-buildvcs=false \
+            "${GO_IMAGE}" \
+            go build -trimpath -ldflags "-buildid= -X main.defaultImage=${IMAGE_REF}" \
+              -o dist/modelwrap ./cmd/modelwrap
+          (cd dist && sha256sum modelwrap > SHA256SUMS)
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/modelwrap dist/SHA256SUMS \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Packer image: \`${REGISTRY}/${IMAGE_NAME}@${{ steps.push.outputs.digest }}\`"
