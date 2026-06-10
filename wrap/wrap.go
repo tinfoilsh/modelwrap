@@ -189,7 +189,13 @@ func resolveModel(opts Options) (model, modelDir string, err error) {
 // resolveHFRevision resolves the default branch HEAD commit of a Hugging
 // Face model via the Hub API.
 func resolveHFRevision(model, token string) (string, error) {
-	req, err := http.NewRequest("GET", "https://huggingface.co/api/models/"+url.PathEscape(model), nil)
+	// Escape each path segment individually: model IDs contain a "/"
+	// separator (org/name) that must not be percent-encoded.
+	segments := strings.Split(model, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	req, err := http.NewRequest("GET", "https://huggingface.co/api/models/"+strings.Join(segments, "/"), nil)
 	if err != nil {
 		return "", err
 	}
