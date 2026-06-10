@@ -10,16 +10,18 @@ RUN printf '%s\n' \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         erofs-utils=1.8.6-1 \
-        cryptsetup=2:2.7.5-2 && \
+        cryptsetup=2:2.7.5-2 \
+        gdisk=1.0.10-2 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
-COPY pack.py .
 
 ENV CACHE_DIR="/cache"
 ENV OUTPUT_DIR="/output"
 
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
+
+COPY pack.py .
 
 ENTRYPOINT ["python3", "pack.py"]
