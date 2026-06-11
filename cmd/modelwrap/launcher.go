@@ -49,10 +49,6 @@ func launch(opts cliOptions) int {
 // of the same CLI inside the packer image.
 func dockerRunArgs(opts cliOptions) ([]string, error) {
 	args := []string{"run", "--rm"}
-	if opts.Encrypt {
-		// EMWP packing needs loop device and device-mapper access.
-		args = append(args, "--privileged")
-	}
 
 	hostDir := func(path, fallback string) (string, error) {
 		if path == "" {

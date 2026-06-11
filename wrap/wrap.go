@@ -17,10 +17,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/tinfoilsh/modelwrap"
+	"github.com/tinfoilsh/modelwrap/crypt"
 )
 
 // Options configures a single packing run. Model is a Hugging Face model
@@ -318,24 +318,17 @@ func encryptEMWP(mwpFile, emwpFile string, ref *modelwrap.ArtifactRef, masterKey
 	totalSectors := endSector + 1 + modelwrap.EMWPGPTTrailingSectors
 	diskUUID := modelwrap.UUIDv5URL(ref.RootHash + "-emwp-disk")
 	tmpFile := emwpFile + ".tmp"
-	dmKeyFile := emwpFile + ".key.tmp"
-	mapperName := "modelwrap-emwp-" + ref.RootHash[:16]
 
 	dmKey, err := modelwrap.DeriveKey(masterKey, ref)
 	if err != nil {
 		return err
 	}
+	defer clear(dmKey)
 
-	for _, path := range []string{tmpFile, dmKeyFile} {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+	if err := os.Remove(tmpFile); err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	defer func() {
-		closeCryptMapper(mapperName)
-		os.Remove(dmKeyFile)
-		os.Remove(tmpFile)
-	}()
+	defer os.Remove(tmpFile)
 
 	fmt.Printf("Creating EMWP GPT image %s\n", emwpFile)
 	if err := createSparseFile(tmpFile, totalSectors*modelwrap.GPTSectorSize); err != nil {
@@ -355,33 +348,31 @@ func encryptEMWP(mwpFile, emwpFile string, ref *modelwrap.ArtifactRef, masterKey
 		return err
 	}
 
-	if err := os.WriteFile(dmKeyFile, dmKey, 0600); err != nil {
-		return err
-	}
-	err = run(exec.Command(
-		"cryptsetup", "open",
-		"--type", "plain",
-		"--cipher", modelwrap.EMWPCipher,
-		"--key-size", strconv.Itoa(modelwrap.EMWPKeySizeBits),
-		"--sector-size", strconv.Itoa(modelwrap.EMWPSectorSize),
-		"--key-file", dmKeyFile,
-		"--offset", strconv.Itoa(modelwrap.EMWPPartitionStartSector),
-		"--skip", "0",
-		"--size", strconv.FormatInt(sectors, 10),
-		tmpFile,
-		mapperName,
-	))
-	if err != nil {
-		return err
-	}
-
-	if err := copyToDevice(mwpFile, "/dev/mapper/"+mapperName); err != nil {
-		return err
-	}
-	if err := closeCryptMapper(mapperName); err != nil {
+	if err := encryptPayload(tmpFile, mwpFile, dmKey); err != nil {
 		return err
 	}
 	return os.Rename(tmpFile, emwpFile)
+}
+
+// encryptPayload streams the dm-crypt encryption of mwpFile into the
+// encrypted payload partition of the GPT image at imgFile.
+func encryptPayload(imgFile, mwpFile string, dmKey []byte) error {
+	in, err := os.Open(mwpFile)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(imgFile, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	payload := io.NewOffsetWriter(out, modelwrap.EMWPPartitionStartSector*modelwrap.GPTSectorSize)
+	if _, err := crypt.EncryptStream(dmKey, payload, in); err != nil {
+		return fmt.Errorf("encrypting %s: %w", mwpFile, err)
+	}
+	return out.Sync()
 }
 
 // VerifyMWP runs an offline dm-verity verification of an MWP artifact
@@ -415,8 +406,8 @@ func VerifyMWP(mwpFile, infoFile string) error {
 	return nil
 }
 
-// VerifyEMWP decrypts an EMWP artifact through a temporary dm-crypt
-// mapping and verifies the inner dm-verity tree.
+// VerifyEMWP decrypts an EMWP artifact's payload partition in userspace and
+// verifies the inner dm-verity tree of the recovered MWP plaintext.
 func VerifyEMWP(emwpFile, infoFile string, masterKey []byte) error {
 	ref, err := parseInfoFile(infoFile)
 	if err != nil {
@@ -427,38 +418,42 @@ func VerifyEMWP(emwpFile, infoFile string, masterKey []byte) error {
 		return fmt.Errorf("EMWP artifact not found: %s", emwpFile)
 	}
 
-	sectors := fi.Size()/modelwrap.GPTSectorSize - modelwrap.EMWPPartitionStartSector - modelwrap.EMWPGPTTrailingSectors
-	dmKeyFile := emwpFile + ".key.tmp"
-	mapperName := "modelwrap-emwp-verify-" + ref.RootHash[:16]
 	dmKey, err := modelwrap.DeriveKey(masterKey, ref)
 	if err != nil {
 		return err
 	}
+	defer clear(dmKey)
 
-	defer func() {
-		closeCryptMapper(mapperName)
-		os.Remove(dmKeyFile)
-	}()
-	if err := os.WriteFile(dmKeyFile, dmKey, 0600); err != nil {
+	plainFile := emwpFile + ".verify.tmp"
+	defer os.Remove(plainFile)
+	if err := decryptPayload(emwpFile, plainFile, fi.Size(), dmKey); err != nil {
 		return err
 	}
-	err = run(exec.Command(
-		"cryptsetup", "open",
-		"--type", "plain",
-		"--cipher", modelwrap.EMWPCipher,
-		"--key-size", strconv.Itoa(modelwrap.EMWPKeySizeBits),
-		"--sector-size", strconv.Itoa(modelwrap.EMWPSectorSize),
-		"--key-file", dmKeyFile,
-		"--offset", strconv.Itoa(modelwrap.EMWPPartitionStartSector),
-		"--skip", "0",
-		"--size", strconv.FormatInt(sectors, 10),
-		emwpFile,
-		mapperName,
-	))
+	return VerifyMWP(plainFile, infoFile)
+}
+
+// decryptPayload streams the decrypted MWP plaintext of an EMWP image's
+// payload partition into plainFile.
+func decryptPayload(emwpFile, plainFile string, emwpSize int64, dmKey []byte) error {
+	partOffset := int64(modelwrap.EMWPPartitionStartSector * modelwrap.GPTSectorSize)
+	partSize := emwpSize - partOffset - int64(modelwrap.EMWPGPTTrailingSectors*modelwrap.GPTSectorSize)
+
+	in, err := os.Open(emwpFile)
 	if err != nil {
 		return err
 	}
-	return VerifyMWP("/dev/mapper/"+mapperName, infoFile)
+	defer in.Close()
+	out, err := os.OpenFile(plainFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	payload := io.NewSectionReader(in, partOffset, partSize)
+	if _, err := crypt.DecryptStream(dmKey, out, payload); err != nil {
+		return fmt.Errorf("decrypting EMWP payload: %w", err)
+	}
+	return out.Sync()
 }
 
 // LoadMasterKey loads the EMWP master key from keyFile if set, else from
@@ -502,31 +497,6 @@ func createSparseFile(path string, size int64) error {
 	}
 	defer f.Close()
 	return f.Truncate(size)
-}
-
-// copyToDevice writes src into the block device dst and syncs it.
-func copyToDevice(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY, 0)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	if _, err := io.CopyBuffer(out, in, make([]byte, 4*1024*1024)); err != nil {
-		return fmt.Errorf("writing %s to %s: %w", src, dst, err)
-	}
-	return out.Sync()
-}
-
-func closeCryptMapper(name string) error {
-	if _, err := os.Stat("/dev/mapper/" + name); os.IsNotExist(err) {
-		return nil
-	}
-	return run(exec.Command("cryptsetup", "close", name))
 }
 
 func run(cmd *exec.Cmd) error {
