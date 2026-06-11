@@ -44,10 +44,11 @@ docker run --rm --privileged \
   -test.run TestEMWPRoundTripIntegration -test.v
 
 # CLI smoke test: the user-facing entrypoint with volumes and key file.
+# Packing is userspace-only, so it runs unprivileged.
 mkdir -p "${WORK_DIR}/cache" "${WORK_DIR}/output"
 printf '%s\n' "${KEY_B64}" > "${WORK_DIR}/emwp-key"
 
-docker run --rm --privileged \
+docker run --rm \
   -v "${WORK_DIR}/cache:/cache" \
   -v "${WORK_DIR}/emwp-key:/run/emwp-key:ro" \
   -v "${WORK_DIR}/output:/output" \

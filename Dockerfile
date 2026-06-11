@@ -4,6 +4,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY *.go ./
+COPY crypt ./crypt
 COPY wrap ./wrap
 COPY cmd ./cmd
 RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags=-buildid= -o /modelwrap ./cmd/modelwrap

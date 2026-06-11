@@ -38,7 +38,7 @@ func TestDockerRunArgs(t *testing.T) {
 	}
 
 	want := []string{
-		"run", "--rm", "--privileged",
+		"run", "--rm",
 		"-v", filepath.Join(dir, "output") + ":/output",
 		"-v", filepath.Join(dir, "cache") + ":/cache",
 		"-v", filepath.Join(dir, "weights") + ":/model:ro",
@@ -52,6 +52,13 @@ func TestDockerRunArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("dockerRunArgs mismatch:\n got %q\nwant %q", got, want)
+	}
+
+	// EMWP packing is fully userspace and must not request privilege.
+	for _, arg := range got {
+		if arg == "--privileged" {
+			t.Fatal("EMWP packing must not be privileged")
+		}
 	}
 
 	// Secret values must never appear in the docker command line.
