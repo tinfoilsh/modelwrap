@@ -12,7 +12,6 @@ set -euo pipefail
 MODEL="${MODEL:-Qwen/Qwen2.5-72B-Instruct}"
 REVISION="${REVISION:-main}"
 ITERATIONS="${ITERATIONS:-2}"
-WORKERS="${WORKERS:-8}"
 OUT_BASE="${OUT_BASE:-/mnt/large/modelwrap-bench}"
 HF_VENV="${HF_VENV:-$HOME/.hf-venv}"
 
@@ -61,7 +60,7 @@ for i in $(seq 1 "$ITERATIONS"); do
 	rm -rf "$out"
 	echo -e "\n=== naive Go iter $i ==="
 	s=$(now)
-	"$OUT_BASE/naive" --repo "$MODEL" --revision "$REVISION" --out "$out" --workers "$WORKERS"
+	"$OUT_BASE/naive" --repo "$MODEL" --revision "$REVISION" --out "$out"
 	e=$(now)
 	record naive "$i" "$s" "$e" "$out"
 	rm -rf "$out"

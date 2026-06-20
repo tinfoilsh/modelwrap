@@ -1,10 +1,12 @@
 // Command naive downloads a Hugging Face model using only the Go standard
 // library: it lists the repo file tree via the Hub API and fetches each
-// file over plain HTTPS (following the resolve redirects to the CDN).
+// file over plain HTTPS (following the resolve redirects to the CDN), one
+// file at a time.
 //
-// It is the "no supply chain" baseline against the official hf CLI
-// (huggingface_hub + hf_xet), which modelwrap currently shells out to.
-// No Python, no huggingface_hub, no Xet plugin — just HTTP.
+// It is the simplest possible "no supply chain" baseline against the
+// official hf CLI (huggingface_hub + hf_xet), which modelwrap currently
+// shells out to. No Python, no huggingface_hub, no Xet plugin, no
+// concurrency — just HTTP, sequentially.
 package main
 
 import (
@@ -19,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -35,17 +36,16 @@ func main() {
 	repo := flag.String("repo", "", "Hugging Face repo id, e.g. Qwen/Qwen2.5-72B-Instruct")
 	rev := flag.String("revision", "main", "revision (branch or commit)")
 	out := flag.String("out", "", "output directory")
-	workers := flag.Int("workers", 8, "concurrent file downloads")
 	flag.Parse()
 
 	if *repo == "" || *out == "" {
-		log.Fatal("usage: naive --repo <org/name> --out <dir> [--revision main] [--workers 8]")
+		log.Fatal("usage: naive --repo <org/name> --out <dir> [--revision main]")
 	}
 
 	token := os.Getenv("HF_TOKEN")
 
 	start := time.Now()
-	total, n, err := run(context.Background(), *repo, *rev, *out, *workers, token)
+	total, n, err := run(context.Background(), *repo, *rev, *out, token)
 	if err != nil {
 		log.Fatalf("download failed after %d files: %v", n, err)
 	}
@@ -56,44 +56,23 @@ func main() {
 		n, total, gib, elapsed.Seconds(), float64(total)/elapsed.Seconds()/(1<<20))
 }
 
-func run(ctx context.Context, repo, rev, out string, workers int, token string) (int64, int, error) {
+func run(ctx context.Context, repo, rev, out, token string) (int64, int, error) {
 	files, err := listTree(ctx, repo, rev, token)
 	if err != nil {
 		return 0, 0, fmt.Errorf("list tree: %w", err)
 	}
 	log.Printf("listed %d files", len(files))
 
-	sem := make(chan struct{}, workers)
-	var wg sync.WaitGroup
-	var (
-		mu       sync.Mutex
-		total    int64
-		done     int
-		firstErr error
-	)
-
-	for _, f := range files {
-		wg.Add(1)
-		go func(f entry) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			n, err := fetchFile(ctx, repo, rev, f.Path, out, token)
-			mu.Lock()
-			total += n
-			done++
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-			mu.Unlock()
-			if done%10 == 0 {
-				log.Printf("  %d/%d files done", done, len(files))
-			}
-		}(f)
+	var total int64
+	for i, f := range files {
+		log.Printf("[%d/%d] %s (%d bytes)", i+1, len(files), f.Path, f.Size)
+		n, err := fetchFile(ctx, repo, rev, f.Path, out, token)
+		total += n
+		if err != nil {
+			return total, i, fmt.Errorf("%s: %w", f.Path, err)
+		}
 	}
-	wg.Wait()
-	return total, done, firstErr
+	return total, len(files), nil
 }
 
 // listTree paginates the Hub tree API and returns leaf (non-directory) entries.

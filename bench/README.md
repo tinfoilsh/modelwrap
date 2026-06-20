@@ -17,7 +17,7 @@ methods measure raw network transfer (no Xet chunk dedup across runs).
 
 ```bash
 # on a box with Go + python3, downloads land on /mnt/large
-ITERATIONS=2 WORKERS=8 bash bench/run.sh
+ITERATIONS=2 bash bench/run.sh
 ```
 
 Results are written to `$OUT_BASE/results.tsv` (tab-separated):
@@ -25,8 +25,8 @@ Results are written to `$OUT_BASE/results.tsv` (tab-separated):
 
 ## Notes
 
-- **naive** uses one TCP connection per file with bounded concurrency over
-  files (default 8). It does not do byte-range chunking of individual large
+- **naive** fetches files sequentially, one TCP connection per file, no
+  concurrency. It does not do byte-range chunking of individual large
   shards, which is Xet's main throughput lever. If naive is close, the Xet
   stack isn't worth its supply-chain cost; if not, Go could add range
   requests without the Python dependency.
