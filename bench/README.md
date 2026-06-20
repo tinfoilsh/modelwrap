@@ -1,35 +1,34 @@
-# Download Benchmark
+# Download Bench
 
-Compares two ways to fetch a Hugging Face model, which is the question
-behind dropping the `hf` CLI from modelwrap's supply chain:
+Three small benchmarks for the question behind dropping the `hf` CLI from
+modelwrap: do we need the Xet stack for fast large-model downloads, or
+would a stdlib-only Go downloader do?
 
-1. **hf-cli** — `hf download` from `huggingface_hub[hf_xet]`. This is what
-   modelwrap does today (`wrap/wrap.go`). Pulls in Python + huggingface_hub
-   + the hf_xet plugin and their full transitive dependency tree.
-2. **naive** — `bench/naive/main.go`, a stdlib-only Go program. Lists the
-   repo tree via the Hub API and GETs each `resolve` URL over plain HTTPS.
-   Zero external dependencies, no Python.
+Each is a standalone Go program with its own run script, and each writes a
+TSV of results you can `rsync` off the bench host.
 
-Each iteration downloads to a fresh directory with a clean cache, so both
-methods measure raw network transfer (no Xet chunk dedup across runs).
+- `diskwrite/` — raw disk write throughput (no network). Writes arbitrary
+  data, fsyncs, reports write vs write+sync MiB/s.
+- `netread/` — raw network download throughput (no disk). Streams every file
+  in a Hugging Face repo to `io.Discard`, reports per-file and total MiB/s.
+- `naive/` — the real stdlib-only downloader, sequential, with per-file
+  network and disk timing separated. Compare against `netread` (no disk) and
+  `diskwrite` (no network) to see where time goes.
+
+All three are Go standard library only — no Python, no `huggingface_hub`,
+no `hf_xet`.
 
 ## Run
 
+On a box with Go (e.g. `inf8.tinfoil.sh`, downloads to `/mnt/large`):
+
 ```bash
-# on a box with Go + python3, downloads land on /mnt/large
-ITERATIONS=2 bash bench/run.sh
+OUT_BASE=/mnt/large/modelwrap-bench bash bench/diskwrite/run.sh
+OUT_BASE=/mnt/large/modelwrap-bench bash bench/netread/run.sh
+OUT_BASE=/mnt/large/modelwrap-bench bash bench/naive/run.sh
 ```
 
-Results are written to `$OUT_BASE/results.tsv` (tab-separated):
-`method iter seconds bytes gib mib_per_s`.
+Results land in `$OUT_BASE/{diskwrite,netread,naive}.tsv` (tab-separated).
 
-## Notes
-
-- **naive** fetches files sequentially, one TCP connection per file, no
-  concurrency. It does not do byte-range chunking of individual large
-  shards, which is Xet's main throughput lever. If naive is close, the Xet
-  stack isn't worth its supply-chain cost; if not, Go could add range
-  requests without the Python dependency.
-- **naive** does not verify SHA256 of LFS blobs (the hf CLI does). That is
-  less work, but also less safe — a tradeoff to call out.
-- Model: `Qwen/Qwen2.5-72B-Instruct` (~145 GiB, open, Xet-backed).
+`bench/xet_probe.py` is a separate one-off: it detects which download path
+`huggingface_hub` actually takes (native Xet CAS vs plain HTTPS) for a file.
