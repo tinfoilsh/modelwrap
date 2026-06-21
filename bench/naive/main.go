@@ -124,7 +124,10 @@ func fetchFile(ctx context.Context, repo, rev, path, out, token string, doSync b
 		err = fmt.Errorf("%s: %s", path, resp.Status)
 		return
 	}
-	buf := bytes.NewBuffer(make([]byte, 0, resp.ContentLength))
+	buf := &bytes.Buffer{}
+	if resp.ContentLength > 0 {
+		buf.Grow(int(resp.ContentLength))
+	}
 	n, err = io.Copy(buf, resp.Body)
 	resp.Body.Close()
 	netT = time.Since(netStart)
