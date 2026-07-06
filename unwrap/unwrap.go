@@ -50,18 +50,32 @@ func CloseCrypt(name string) {
 }
 
 // OpenVerity opens a dm-verity mapping over a device that contains a
-// filesystem followed by its hash tree at hashOffset. The remaining
-// verity parameters come from the superblock, which is authenticated by
-// the root hash.
-func OpenVerity(device, name, rootHash, hashOffset string) error {
-	cmd := exec.Command(
-		"veritysetup", "open",
+// filesystem followed by its hash tree at hashOffset.
+//
+// The mapping is always opened with --no-superblock and fully explicit,
+// pinned format parameters, so veritysetup and the kernel never parse
+// any on-disk metadata. The data size is derived from the attested
+// hashOffset, and the salt (32 bytes) is re-derived from the attested
+// model identity via modelwrap.VeritySalt. A wrong salt fails closed:
+// nothing can verify against the attested root hash.
+func OpenVerity(device, name, rootHash, hashOffset string, salt []byte) error {
+	offset, err := strconv.ParseUint(hashOffset, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid hash offset %q: %w", hashOffset, err)
+	}
+	params, err := modelwrap.VerityParamsForArtifact(offset, salt)
+	if err != nil {
+		return err
+	}
+
+	args := append([]string{
+		"open",
 		device,
 		name,
 		device,
 		rootHash,
-		"--hash-offset="+hashOffset,
-	)
+	}, params.VeritysetupArgs()...)
+	cmd := exec.Command("veritysetup", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

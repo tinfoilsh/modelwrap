@@ -7,7 +7,6 @@
 package wrap
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -88,7 +87,7 @@ func Pack(opts Options) (string, error) {
 	}
 
 	if opts.Verify {
-		if err := VerifyMWP(mwpFile, infoFile); err != nil {
+		if err := VerifyMWP(mwpFile, infoFile, model); err != nil {
 			return "", err
 		}
 	} else {
@@ -135,7 +134,7 @@ func Pack(opts Options) (string, error) {
 	}
 
 	if opts.Verify {
-		if err := VerifyEMWP(emwpFile, emwpInfoFile, masterKey); err != nil {
+		if err := VerifyEMWP(emwpFile, emwpInfoFile, masterKey, model); err != nil {
 			return "", err
 		}
 	}
@@ -271,8 +270,14 @@ func formatVerity(model, mwpFile, infoFile string) error {
 		return err
 	}
 	offset := (fi.Size() + 4095) / 4096 * 4096
+	if fi.Size() != offset {
+		// The strict consumer derives the data size from the hash offset
+		// (data area == hashOffset bytes), which requires block alignment.
+		// EROFS images are always 4K-aligned, so this should never fire.
+		return fmt.Errorf("EROFS image size %d is not a multiple of %d", fi.Size(), modelwrap.VerityDataBlockSize)
+	}
 	verityUUID := modelwrap.UUIDv5URL(model + "-inner")
-	salt := sha256.Sum256([]byte(model))
+	salt := modelwrap.VeritySalt(model)
 
 	fmt.Printf("Running veritysetup on %s\n", mwpFile)
 	err = run(exec.Command(
@@ -281,7 +286,7 @@ func formatVerity(model, mwpFile, infoFile string) error {
 		"--hash="+modelwrap.VerityHashAlgorithm,
 		fmt.Sprintf("--data-block-size=%d", modelwrap.VerityDataBlockSize),
 		fmt.Sprintf("--hash-block-size=%d", modelwrap.VerityHashBlockSize),
-		"--salt="+hex.EncodeToString(salt[:]),
+		"--salt="+hex.EncodeToString(salt),
 		"--uuid="+verityUUID,
 		fmt.Sprintf("--hash-offset=%d", offset),
 		"--root-hash-file="+infoFile,
@@ -376,8 +381,10 @@ func encryptPayload(imgFile, mwpFile string, dmKey []byte) error {
 }
 
 // VerifyMWP runs an offline dm-verity verification of an MWP artifact
-// against its info file.
-func VerifyMWP(mwpFile, infoFile string) error {
+// against its info file, through the same strict path consumers use:
+// veritysetup with --no-superblock and fully explicit parameters, with
+// the salt derived from the model identity.
+func VerifyMWP(mwpFile, infoFile, model string) error {
 	ref, err := parseInfoFile(infoFile)
 	if err != nil {
 		return err
@@ -386,19 +393,23 @@ func VerifyMWP(mwpFile, infoFile string) error {
 		return fmt.Errorf("MWP artifact not found: %s", mwpFile)
 	}
 
+	offset, err := ref.HashOffsetBytes()
+	if err != nil {
+		return err
+	}
+	params, err := modelwrap.VerityParamsForArtifact(offset, modelwrap.VeritySalt(model))
+	if err != nil {
+		return err
+	}
+
 	fmt.Printf("Verifying dm-verity artifact %s\n", mwpFile)
-	err = run(exec.Command(
-		"veritysetup",
-		fmt.Sprintf("--format=%d", modelwrap.VerityFormat),
-		"--hash="+modelwrap.VerityHashAlgorithm,
-		fmt.Sprintf("--data-block-size=%d", modelwrap.VerityDataBlockSize),
-		fmt.Sprintf("--hash-block-size=%d", modelwrap.VerityHashBlockSize),
-		"--hash-offset="+ref.HashOffset,
+	args := append([]string{
 		"verify",
 		mwpFile, // data device
 		mwpFile, // hash device
 		ref.RootHash,
-	))
+	}, params.VeritysetupArgs()...)
+	err = run(exec.Command("veritysetup", args...))
 	if err != nil {
 		return err
 	}
@@ -408,7 +419,7 @@ func VerifyMWP(mwpFile, infoFile string) error {
 
 // VerifyEMWP decrypts an EMWP artifact's payload partition in userspace and
 // verifies the inner dm-verity tree of the recovered MWP plaintext.
-func VerifyEMWP(emwpFile, infoFile string, masterKey []byte) error {
+func VerifyEMWP(emwpFile, infoFile string, masterKey []byte, model string) error {
 	ref, err := parseInfoFile(infoFile)
 	if err != nil {
 		return err
@@ -429,7 +440,7 @@ func VerifyEMWP(emwpFile, infoFile string, masterKey []byte) error {
 	if err := decryptPayload(emwpFile, plainFile, fi.Size(), dmKey); err != nil {
 		return err
 	}
-	return VerifyMWP(plainFile, infoFile)
+	return VerifyMWP(plainFile, infoFile, model)
 }
 
 // decryptPayload streams the decrypted MWP plaintext of an EMWP image's

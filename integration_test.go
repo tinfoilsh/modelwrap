@@ -3,7 +3,9 @@
 package modelwrap_test
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -97,9 +99,11 @@ func TestEMWPRoundTripIntegration(t *testing.T) {
 	}
 	t.Cleanup(func() { unwrap.CloseCrypt(cryptName) })
 
+	// Salt re-derived from the attested model identity; the artifact's
+	// superblock is never read.
 	verityName := "modelwrap-it-verity"
-	if err := unwrap.OpenVerity("/dev/mapper/"+cryptName, verityName, ref.RootHash, ref.HashOffset); err != nil {
-		t.Fatalf("opening dm-verity: %v", err)
+	if err := unwrap.OpenVerity("/dev/mapper/"+cryptName, verityName, ref.RootHash, ref.HashOffset, modelwrap.VeritySalt(integrationModel)); err != nil {
+		t.Fatalf("opening dm-verity via derived salt: %v", err)
 	}
 	t.Cleanup(func() { unwrap.CloseVerity(verityName) })
 
@@ -231,7 +235,7 @@ func TestEMWPGoEncryptKernelDecrypt(t *testing.T) {
 	if _, err := io.ReadFull(dev, got); err != nil {
 		t.Fatalf("reading kernel-decrypted device: %v", err)
 	}
-	if !bytesEqual(got, plain) {
+	if !bytes.Equal(got, plain) {
 		t.Fatalf("kernel dm-crypt decryption does not match the original MWP plaintext "+
 			"(first diff at byte %d): Go ciphertext is not dm-crypt compatible", firstDiffIdx(got, plain))
 	}
@@ -239,8 +243,123 @@ func TestEMWPGoEncryptKernelDecrypt(t *testing.T) {
 	// Independent integrity check, in userspace so it needs no dm-verity
 	// kernel target: the kernel-decrypted plaintext must satisfy the attested
 	// root hash.
-	if err := wrap.VerifyMWP("/dev/mapper/"+cryptName, filepath.Join(work, "output", "testmodel", "v1.info")); err != nil {
+	if err := wrap.VerifyMWP("/dev/mapper/"+cryptName, filepath.Join(work, "output", "testmodel", "v1.info"), "testmodel@v1"); err != nil {
 		t.Fatalf("veritysetup verify over kernel-decrypted plaintext: %v", err)
+	}
+}
+
+// TestMWPSuperblockTamperIntegration demonstrates the superblock
+// truncation issue and verifies the --no-superblock open path closes it.
+// It packs a local directory as plaintext MWP, shrinks the superblock's
+// data_blocks field by one, and checks that:
+//
+//  1. a legacy superblock-trusting open (plain --hash-offset) accepts the
+//     tampered artifact and maps a silently truncated device;
+//  2. the attested-identity open (derived salt, superblock never read)
+//     opens the full, untruncated device despite the tampering.
+//
+// Requires the same privileged Linux environment as the round-trip test.
+func TestMWPSuperblockTamperIntegration(t *testing.T) {
+	if os.Getenv("TINFOIL_MODELWRAP_INTEGRATION") != "1" {
+		t.Skip("set TINFOIL_MODELWRAP_INTEGRATION=1 to run")
+	}
+
+	work := t.TempDir()
+	modelDir := filepath.Join(work, "model")
+	if err := os.MkdirAll(modelDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A payload large enough for a few data blocks.
+	payload := bytes.Repeat([]byte("tinfoil superblock tamper test\n"), 8192)
+	for _, name := range []string{"weights.bin", "config.json"} {
+		if err := os.WriteFile(filepath.Join(modelDir, name), payload, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rawRef, err := wrap.Pack(wrap.Options{
+		Model:     "tamper-test",
+		ModelDir:  modelDir,
+		CacheDir:  filepath.Join(work, "cache"),
+		OutputDir: filepath.Join(work, "output"),
+		Verify:    true,
+	})
+	if err != nil {
+		t.Fatalf("packing MWP: %v", err)
+	}
+	ref, err := modelwrap.ParseRef(rawRef)
+	if err != nil {
+		t.Fatalf("parsing packed ref %q: %v", rawRef, err)
+	}
+	revision, err := modelwrap.HashDir(modelDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := "tamper-test@" + revision
+	mwpFile := filepath.Join(work, "output", "tamper-test", revision+".mpk")
+	hashOffset, err := ref.HashOffsetBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Shrink data_blocks (u64 at superblock offset 72) by one block.
+	f, err := os.OpenFile(mwpFile, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	blocksField := make([]byte, 8)
+	if _, err := f.ReadAt(blocksField, int64(hashOffset)+72); err != nil {
+		t.Fatal(err)
+	}
+	dataBlocks := binary.LittleEndian.Uint64(blocksField)
+	binary.LittleEndian.PutUint64(blocksField, dataBlocks-1)
+	if _, err := f.WriteAt(blocksField, int64(hashOffset)+72); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Legacy superblock-trusting open accepts the tampered artifact.
+	legacyName := "modelwrap-it-tamper-legacy"
+	legacy := exec.Command("veritysetup", "open", mwpFile, legacyName, mwpFile, ref.RootHash, "--hash-offset="+ref.HashOffset)
+	legacy.Stdout, legacy.Stderr = os.Stdout, os.Stderr
+	if err := legacy.Run(); err != nil {
+		t.Fatalf("expected legacy superblock-trusting open to accept the truncated artifact, got: %v", err)
+	}
+	sectors, err := exec.Command("blockdev", "--getsz", "/dev/mapper/"+legacyName).Output()
+	unwrap.CloseVerity(legacyName)
+	if err != nil {
+		t.Fatalf("reading truncated mapper size: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(sectors)), fmt.Sprint((dataBlocks-1)*8); got != want {
+		t.Fatalf("legacy mapper size = %s sectors, want truncated %s", got, want)
+	}
+	t.Logf("legacy open accepted tampered artifact with truncated size %d blocks", dataBlocks-1)
+
+	// 2. Attested-identity open never reads the superblock and maps the full device.
+	derivedName := "modelwrap-it-tamper-derived"
+	if err := unwrap.OpenVerity(mwpFile, derivedName, ref.RootHash, ref.HashOffset, modelwrap.VeritySalt(model)); err != nil {
+		t.Fatalf("derived-salt open failed on tampered superblock: %v", err)
+	}
+	t.Cleanup(func() { unwrap.CloseVerity(derivedName) })
+	sectors, err = exec.Command("blockdev", "--getsz", "/dev/mapper/"+derivedName).Output()
+	if err != nil {
+		t.Fatalf("reading derived mapper size: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(sectors)), fmt.Sprint(dataBlocks*8); got != want {
+		t.Fatalf("derived mapper size = %s sectors, want full %s", got, want)
+	}
+
+	mountPoint := filepath.Join(work, "mnt")
+	if err := unwrap.Mount("/dev/mapper/"+derivedName, mountPoint); err != nil {
+		t.Fatalf("mounting verified EROFS: %v", err)
+	}
+	t.Cleanup(func() { _ = exec.Command("umount", mountPoint).Run() })
+	got, err := os.ReadFile(filepath.Join(mountPoint, "weights.bin"))
+	if err != nil {
+		t.Fatalf("reading mounted file: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("mounted file content mismatch")
 	}
 }
 
@@ -251,16 +370,4 @@ func firstDiffIdx(a, b []byte) int {
 		}
 	}
 	return min(len(a), len(b))
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

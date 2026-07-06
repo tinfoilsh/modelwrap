@@ -12,19 +12,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	"golang.org/x/mod/sumdb/dirhash"
-)
-
-// dm-verity format parameters. These are passed explicitly to veritysetup
-// so tool default changes never silently alter the artifact format.
-const (
-	VerityFormat        = 1
-	VerityHashAlgorithm = "sha256"
-	VerityDataBlockSize = 4096
-	VerityHashBlockSize = 4096
 )
 
 // EMWP dm-crypt parameters.
@@ -94,6 +86,15 @@ func (r *ArtifactRef) String() string {
 // EMWP key derivation, binding the derived key to one specific artifact.
 func (r *ArtifactRef) ArtifactID() string {
 	return r.RootHash + "_" + r.UUID
+}
+
+// HashOffsetBytes parses the reference's hash offset field.
+func (r *ArtifactRef) HashOffsetBytes() (uint64, error) {
+	offset, err := strconv.ParseUint(r.HashOffset, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid hash offset %q: %w", r.HashOffset, err)
+	}
+	return offset, nil
 }
 
 // DeriveKey derives the per-artifact dm-crypt key from the EMWP master key
