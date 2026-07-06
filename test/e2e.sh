@@ -35,13 +35,14 @@ docker run --rm \
   "${GO_IMAGE}" \
   bash -c 'export PATH="${PATH}:/usr/local/go/bin" && cd /src && GOOS=linux go test -tags=integration -c . -o /work/modelwrap.test'
 
-# Protocol round trip: pack with wrap, consume with unwrap.
+# Protocol round trip plus superblock tamper regression: pack with wrap,
+# consume with unwrap, reject/neutralize tampered superblocks.
 docker run --rm --privileged \
   -v "${WORK_DIR}/modelwrap.test:/tmp/modelwrap.test:ro" \
   -e TINFOIL_MODELWRAP_INTEGRATION=1 \
   --entrypoint /tmp/modelwrap.test \
   "${IMAGE}" \
-  -test.run TestEMWPRoundTripIntegration -test.v
+  -test.run 'TestEMWPRoundTripIntegration|TestEMWPGoEncryptKernelDecrypt|TestMWPSuperblockTamperIntegration' -test.v
 
 # CLI smoke test: the user-facing entrypoint with volumes and key file.
 # Packing is userspace-only, so it runs unprivileged.

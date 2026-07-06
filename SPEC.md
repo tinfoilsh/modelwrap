@@ -47,6 +47,17 @@ models:
 
 At boot, the secure enclave does not mount the MWP disk directly. It first asks dm-verity to create a verified read-only mapper device using the trusted `rootHash` and `hashOffset`. It then mounts that verified mapper as EROFS.
 
+### dm-verity Parameter Pinning
+
+The verity mapping is always opened with `--no-superblock` and fully explicit parameters, so neither veritysetup nor the kernel ever parses on-disk metadata:
+
+- Hash algorithm, format version, and block sizes are fixed format constants.
+- The data size is `hashOffset / 4096` blocks, derived from the *attested* reference: the MWP data area is exactly the bytes preceding the hash area. This forecloses tampering with the on-disk data-size field to truncate the mapped device.
+- The hash tree starts at `hashOffset + 4096` (one hash block past the superblock slot).
+- The salt is `SHA256(<model identity>)` where the model identity is the packer's `name@revision` string, carried in the attested config as the required `repo` field. The consumer re-derives it; a wrong `repo` fails closed because nothing verifies against the attested root hash.
+
+The artifact still contains a dm-verity superblock at `hashOffset` (veritysetup writes one at format time), but consumers never read it: it is untrusted dead bytes occupying the first hash block.
+
 The mount path is:
 
 ```text
@@ -76,6 +87,7 @@ Example config:
 ```yaml
 models:
   - name: private-model
+    repo: "<hf_org>@<revision>"
     emwp: <rootHash>_<hashOffset>_<uuid>
     key-secret: PRIVATE_MODEL_KEY
 ```
@@ -157,6 +169,7 @@ Untrusted:
 Important consequences:
 
 - dm-verity integrity depends on the `rootHash` from *attested* config.
+- No artifact bytes are ever parsed before verification: every verity parameter is a pinned constant or derived from attested values (`rootHash`, `hashOffset`, `repo`), never read from the artifact.
 - EMWP confidentiality depends on the external EMWP master key.
 - EMWP authenticity is still the plaintext dm-verity check after decryption.
 - A malicious but correctly attested model artifact can still contain malicious model code or data.
