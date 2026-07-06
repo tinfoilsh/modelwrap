@@ -30,14 +30,17 @@ const (
 )
 
 // CryptsetupArgs returns the explicit cryptsetup arguments pinning the
-// EMWP cipher parameters for a plain open. Packer and consumer share this
-// builder so their dm-crypt mappings can never drift apart.
+// EMWP cipher parameters for a plain open, so tool default changes can
+// never alter the mapping. --skip 0 pins the plain64 IV numbering to
+// start at the volume's first sector, matching the Go encryptor and the
+// dm-crypt golden vector.
 func CryptsetupArgs() []string {
 	return []string{
 		"--type", "plain",
 		"--cipher", EMWPCipher,
 		"--key-size", strconv.Itoa(EMWPKeySizeBits),
 		"--sector-size", strconv.Itoa(EMWPSectorSize),
+		"--skip", "0",
 	}
 }
 
