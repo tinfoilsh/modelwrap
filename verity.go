@@ -62,8 +62,11 @@ func VerityParamsForArtifact(hashOffset uint64, salt []byte) (*VerityParams, err
 	if len(salt) != VeritySaltBytes {
 		return nil, fmt.Errorf("verity salt is %d bytes, want %d", len(salt), VeritySaltBytes)
 	}
-	if hashOffset == 0 || hashOffset%VerityDataBlockSize != 0 || hashOffset > maxHashOffset {
+	if hashOffset == 0 || hashOffset%VerityDataBlockSize != 0 {
 		return nil, fmt.Errorf("hash offset %d is not a positive multiple of %d", hashOffset, VerityDataBlockSize)
+	}
+	if hashOffset > maxHashOffset {
+		return nil, fmt.Errorf("hash offset %d exceeds maximum %d", hashOffset, uint64(maxHashOffset))
 	}
 	return &VerityParams{
 		Salt:           salt,

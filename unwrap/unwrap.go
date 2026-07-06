@@ -65,7 +65,7 @@ func OpenVerity(device, name, rootHash, hashOffset string, salt []byte) error {
 	}
 	params, err := modelwrap.VerityParamsForArtifact(offset, salt)
 	if err != nil {
-		return err
+		return fmt.Errorf("deriving verity params: %w", err)
 	}
 
 	args := append([]string{

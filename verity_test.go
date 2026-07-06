@@ -1,6 +1,7 @@
 package modelwrap
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -40,6 +41,7 @@ func TestVerityParamsForArtifact(t *testing.T) {
 		"--hash-block-size=4096",
 		"--data-blocks=10",
 		"--hash-offset=45056",
+		"--salt=" + hex.EncodeToString(salt),
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("veritysetup args %q missing %q", args, want)
