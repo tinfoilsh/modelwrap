@@ -36,7 +36,7 @@ func Delete(opts DeleteOptions) error {
 	var errs []error
 	for _, suffix := range []string{
 		".mpk", ".info", ".emwp", ".emwp.info",
-		".mpk.tmp", ".info.tmp", ".emwp.tmp", ".emwp.info.tmp",
+		".mpk.tmp", ".info.tmp", ".emwp.tmp", ".emwp.info.tmp", ".emwp.verify.tmp",
 	} {
 		if err := os.Remove(base + suffix); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, fmt.Errorf("removing %s: %w", base+suffix, err))

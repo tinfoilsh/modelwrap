@@ -17,6 +17,7 @@ func TestDeleteRemovesOnlyPinnedRevision(t *testing.T) {
 		filepath.Join(modelDir, "rev1.info"),
 		filepath.Join(modelDir, "rev1.emwp"),
 		filepath.Join(modelDir, "rev1.emwp.info"),
+		filepath.Join(modelDir, "rev1.emwp.verify.tmp"),
 		filepath.Join(modelDir, "rev2.mpk"),
 		filepath.Join(cacheModelDir, "rev1", "weights.bin"),
 		filepath.Join(cacheModelDir, "rev2", "weights.bin"),
@@ -43,6 +44,7 @@ func TestDeleteRemovesOnlyPinnedRevision(t *testing.T) {
 		filepath.Join(modelDir, "rev1.info"),
 		filepath.Join(modelDir, "rev1.emwp"),
 		filepath.Join(modelDir, "rev1.emwp.info"),
+		filepath.Join(modelDir, "rev1.emwp.verify.tmp"),
 		filepath.Join(cacheModelDir, "rev1"),
 	} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
