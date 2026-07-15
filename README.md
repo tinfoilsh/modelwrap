@@ -17,6 +17,12 @@ matching image digest.
 modelwrap mistralai/Ministral-3-3B-Instruct-2512@cfcb068fa7c44114cf77a462357c6cdcd2c304b4
 ```
 
+Delete the generated artifacts and downloaded cache for one pinned revision:
+
+```sh
+modelwrap --delete mistralai/Ministral-3-3B-Instruct-2512@cfcb068fa7c44114cf77a462357c6cdcd2c304b4
+```
+
 To pack and encrypt a local/private model directory:
 
 ```bash
