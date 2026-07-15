@@ -106,6 +106,9 @@ func dockerRunArgs(opts cliOptions) ([]string, error) {
 
 	args = append(args, opts.image)
 
+	if opts.delete {
+		args = append(args, "--delete")
+	}
 	if opts.ModelDir != "" {
 		args = append(args, "--model-dir", containerModelDir)
 	}

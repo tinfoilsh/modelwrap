@@ -98,3 +98,23 @@ func TestDockerRunArgsPlainMWP(t *testing.T) {
 		t.Fatalf("expected model as final arg: %q", got)
 	}
 }
+
+func TestDockerRunArgsDelete(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("HF_TOKEN", "")
+	t.Setenv("PRIVATE_MODEL_KEY_B64", "")
+	t.Setenv("PRIVATE_MODEL_KEY_FILE", "")
+
+	got, err := dockerRunArgs(cliOptions{
+		Options: wrap.Options{Model: "org/model@rev"},
+		image:   "img",
+		delete:  true,
+	})
+	if err != nil {
+		t.Fatalf("dockerRunArgs: %v", err)
+	}
+	wantTail := []string{"img", "--delete", "org/model@rev"}
+	if !reflect.DeepEqual(got[len(got)-len(wantTail):], wantTail) {
+		t.Fatalf("delete args tail = %q, want %q", got, wantTail)
+	}
+}

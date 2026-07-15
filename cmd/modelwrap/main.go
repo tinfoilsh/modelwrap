@@ -31,6 +31,7 @@ Run on a host, modelwrap re-executes itself inside the pinned packer
 container image (requires docker). Inside the container it packs directly.
 
 Flags:
+  --delete            delete artifacts and cache for model@revision
   --model-dir <path>  pack a local model directory instead of downloading
   --encrypt           emit encrypted EMWP output (requires a master key)
   --key-file <path>   file containing the base64-encoded 64-byte EMWP master key
@@ -48,8 +49,9 @@ MODELWRAP_IMAGE.`
 // cliOptions extends the packer options with launcher-only settings.
 type cliOptions struct {
 	wrap.Options
-	image string
-	local bool
+	image  string
+	local  bool
+	delete bool
 }
 
 func main() {
@@ -62,6 +64,16 @@ func main() {
 	}
 
 	if opts.local || os.Getenv("MODELWRAP_IN_CONTAINER") == "1" {
+		if opts.delete {
+			if err := wrap.Delete(wrap.DeleteOptions{
+				Model: opts.Model, CacheDir: opts.CacheDir, OutputDir: opts.OutputDir,
+			}); err != nil {
+				fmt.Fprintln(os.Stderr, "Error:", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Deleted modelwrap artifacts for %s\n", opts.Model)
+			return
+		}
 		ref, err := wrap.Pack(opts.Options)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
@@ -100,6 +112,7 @@ func parseArgs(args []string) (cliOptions, error) {
 	fs.StringVar(&opts.OutputDir, "output", opts.OutputDir, "")
 	fs.StringVar(&opts.CacheDir, "cache", opts.CacheDir, "")
 	fs.StringVar(&opts.image, "image", opts.image, "")
+	fs.BoolVar(&opts.delete, "delete", false, "")
 	fs.BoolVar(&opts.Verify, "verify", opts.Verify, "")
 	fs.BoolVar(&opts.Encrypt, "encrypt", opts.Encrypt, "")
 	fs.BoolVar(&opts.local, "local", false, "")
@@ -115,6 +128,10 @@ func parseArgs(args []string) (cliOptions, error) {
 	}
 	if len(rest) == 1 {
 		opts.Model = rest[0]
+	}
+	if opts.delete && (opts.ModelDir != "" || opts.Encrypt || opts.Verify || opts.KeyFile != "") {
+		fmt.Fprintln(os.Stderr, "--delete cannot be combined with --model-dir, --encrypt, --verify, or --key-file")
+		return opts, fmt.Errorf("invalid delete options")
 	}
 	return opts, nil
 }
