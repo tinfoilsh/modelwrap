@@ -23,6 +23,12 @@ const (
 	integrationModelName     = "hf-internal-testing/tiny-random-GPT2Model"
 	integrationModelRevision = "d6694b0d8fe17978761c9305dc151780506b192e"
 	integrationModel         = integrationModelName + "@" + integrationModelRevision
+
+	// integrationExpectedRef pins the full packed ref
+	// (rootHash_hashOffset_uuid) for integrationModel. If such a change is
+	// intentional, update this constant and treat it as a breaking change for
+	// every already-enrolled artifact hash.
+	integrationExpectedRef = "17c6605f3becf63a63da37cc6958b2d18f8abc750f9f546b9f57133db40c4326_2142208_9701bf21-6de2-59a2-bdea-141aaae05fc3"
 )
 
 // TestEMWPRoundTripIntegration downloads and packs a tiny public model as
@@ -60,6 +66,13 @@ func TestEMWPRoundTripIntegration(t *testing.T) {
 	}
 	if want := modelwrap.UUIDv5URL(integrationModel + "-emwp-outer"); ref.UUID != want {
 		t.Fatalf("EMWP PARTUUID = %s, want %s", ref.UUID, want)
+	}
+	// Check that the generated ref is still stable. If the ref changes, then
+	// the new version should be considered a breaking change.
+	if rawRef != integrationExpectedRef {
+		t.Fatalf("packed ref = %s, want %s\n"+
+			"The generated artifact changed. If a packer toolchain change was intentional, "+
+			"update integrationExpectedRef; otherwise find what changed in the container image.", rawRef, integrationExpectedRef)
 	}
 
 	emwpFile := filepath.Join(work, "output", integrationModelName, integrationModelRevision+".emwp")
