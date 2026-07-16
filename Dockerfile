@@ -16,11 +16,12 @@ ARG DEBIAN_SNAPSHOT=20260518T000000Z
 RUN printf '%s\n' \
     "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie main" \
     "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ trixie-security main" \
+    "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ bookworm main" \
     > /etc/apt/sources.list && \
     rm -f /etc/apt/sources.list.d/*.sources && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        erofs-utils=1.8.6-1 \
+        erofs-utils=1.5-1 \
         cryptsetup=2:2.7.5-2 \
         gdisk=1.0.10-2 && \
     rm -rf /var/lib/apt/lists/*
