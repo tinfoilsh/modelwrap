@@ -169,6 +169,7 @@ func TestFormatVerityHashTreeDeterminism(t *testing.T) {
 func TestFormatVerityHashTreeErrors(t *testing.T) {
 	img := filepath.Join(t.TempDir(), "img")
 	writePatternFile(t, img, 2*VerityDataBlockSize)
+	before := fileSum(t, img)
 
 	for name, p := range map[string]VerityFormatParams{
 		"zero data blocks":   {Salt: testVeritySalt, UUID: testVerityUUID, DataBlocks: 0, HashOffset: 4096},
@@ -177,10 +178,19 @@ func TestFormatVerityHashTreeErrors(t *testing.T) {
 		"oversized salt":     {Salt: make([]byte, 257), UUID: testVerityUUID, DataBlocks: 1, HashOffset: 4096},
 		"bad uuid":           {Salt: testVeritySalt, UUID: "not-a-uuid", DataBlocks: 1, HashOffset: 4096},
 		"misaligned 4095ish": {Salt: testVeritySalt, UUID: testVerityUUID, DataBlocks: 4095 / VerityDataBlockSize, HashOffset: 4096},
+		// The file has only 2 data blocks: claiming 3 must fail rather
+		// than hash the hole zeros past EOF into a phantom tree.
+		"data area beyond EOF": {Salt: testVeritySalt, UUID: testVerityUUID, DataBlocks: 3, HashOffset: 12288},
+		"data blocks overflow": {Salt: testVeritySalt, UUID: testVerityUUID, DataBlocks: maxHashOffset/VerityDataBlockSize + 1, HashOffset: 4096},
 	} {
 		if _, err := FormatVerityHashTree(img, p); err == nil {
 			t.Errorf("%s: no error", name)
 		}
+	}
+
+	// None of the rejected calls may have modified the file.
+	if fileSum(t, img) != before {
+		t.Error("a rejected format call modified the file")
 	}
 }
 
@@ -193,7 +203,8 @@ func TestFormatVerityHashTreeErrors(t *testing.T) {
 // veritysetup is not installed (run it inside the packer container).
 func TestFormatVerityHashTreeDifferential(t *testing.T) {
 	if _, err := exec.LookPath("veritysetup"); err != nil {
-		t.Skip("veritysetup not installed")
+		t.Skipf("SKIPPING DIFFERENTIAL SUITE: veritysetup not installed; " +
+			"run inside the packer container (test/e2e.sh runs it in CI)")
 	}
 
 	blockCases := []uint64{1, 2, 127, 128, 129, 130, 16384, 16385}

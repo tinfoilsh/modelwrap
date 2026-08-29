@@ -57,6 +57,9 @@ func FormatVerityHashTree(path string, p VerityFormatParams) ([]byte, error) {
 	if p.DataBlocks == 0 {
 		return nil, fmt.Errorf("verity data area is empty")
 	}
+	if p.DataBlocks > maxHashOffset/VerityDataBlockSize {
+		return nil, fmt.Errorf("data area of %d blocks exceeds maximum %d", p.DataBlocks, uint64(maxHashOffset/VerityDataBlockSize))
+	}
 	if p.HashOffset%VerityHashBlockSize != 0 {
 		return nil, fmt.Errorf("hash offset %d is not a multiple of %d", p.HashOffset, VerityHashBlockSize)
 	}
@@ -77,6 +80,18 @@ func FormatVerityHashTree(path string, p VerityFormatParams) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
+
+	// The data area must really exist: writes into the hash area extend
+	// the file, so without this check missing data blocks would read back
+	// as hole zeros and be hashed into a well-formed tree over phantom
+	// data — an artifact veritysetup could never produce.
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if uint64(fi.Size()) < p.DataBlocks*VerityDataBlockSize {
+		return nil, fmt.Errorf("file is %d bytes, smaller than the %d-block data area", fi.Size(), p.DataBlocks)
+	}
 
 	// Tree geometry, matching veritysetup: level 0 holds the digests of
 	// the data blocks, each higher level the digests of the level below,

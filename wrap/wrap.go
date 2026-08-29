@@ -298,8 +298,9 @@ func formatVerity(model, mwpFile, infoFile string) error {
 	}
 	fmt.Printf("Root hash: %s\n", hex.EncodeToString(rootHash))
 
+	// 0600 matches the mode veritysetup gave its --root-hash-file.
 	ref := fmt.Sprintf("%s_%d_%s", hex.EncodeToString(rootHash), offset, verityUUID)
-	if err := os.WriteFile(infoFile+".tmp", []byte(ref), 0644); err != nil {
+	if err := os.WriteFile(infoFile+".tmp", []byte(ref), 0600); err != nil {
 		return err
 	}
 	return os.Rename(infoFile+".tmp", infoFile)
