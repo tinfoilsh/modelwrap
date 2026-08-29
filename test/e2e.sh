@@ -39,13 +39,15 @@ docker run --rm \
 # consume with unwrap, reject/neutralize tampered superblocks. Also the
 # verity differential suite: the packer image ships the pinned veritysetup
 # the Go hash-tree builder must match byte for byte (-test.short keeps the
-# multi-GiB fixtures out of CI; the boundary cases all run).
+# multi-GiB fixtures out of CI; the boundary cases all run). And the
+# download-seeding differential: a seeded wrap must be byte-identical to a
+# cold wrap.
 docker run --rm --privileged \
   -v "${WORK_DIR}/modelwrap.test:/tmp/modelwrap.test:ro" \
   -e TINFOIL_MODELWRAP_INTEGRATION=1 \
   --entrypoint /tmp/modelwrap.test \
   "${IMAGE}" \
-  -test.run 'TestEMWPRoundTripIntegration|TestEMWPGoEncryptKernelDecrypt|TestMWPSuperblockTamperIntegration|TestFormatVerityHashTreeDifferential' -test.short -test.v
+  -test.run 'TestEMWPRoundTripIntegration|TestEMWPGoEncryptKernelDecrypt|TestMWPSuperblockTamperIntegration|TestFormatVerityHashTreeDifferential|TestSeededWrapMatchesColdWrap' -test.short -test.v
 
 # CLI smoke test: the user-facing entrypoint with volumes and key file.
 # Packing is userspace-only, so it runs unprivileged.

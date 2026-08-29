@@ -64,6 +64,7 @@ func Pack(opts Options) (string, error) {
 		fmt.Printf("Using local model directory %s as %s\n", modelDir, model)
 	} else {
 		fmt.Printf("Downloading %s to %s\n", model, modelDir)
+		seedFromPreviousRevisions(modelName, modelCommit, modelDir, opts.HFToken)
 		if err := downloadModel(modelName, modelCommit, modelDir, opts.HFToken); err != nil {
 			return "", err
 		}
