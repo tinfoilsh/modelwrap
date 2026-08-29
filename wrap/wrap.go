@@ -2,8 +2,9 @@
 // EROFS images of model directories, wraps them with dm-verity (MWP), and
 // optionally encrypts them into a GPT disk image with dm-crypt (EMWP).
 //
-// It shells out to mkfs.erofs, veritysetup, cryptsetup, and sgdisk, and is
-// only intended to run inside the modelwrap container on Linux.
+// It shells out to mkfs.erofs, sgdisk, and (for verification) veritysetup,
+// and is only intended to run inside the modelwrap container on Linux. The
+// dm-verity hash tree itself is built natively, in parallel.
 package wrap
 
 import (
@@ -16,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/tinfoilsh/modelwrap"
@@ -257,6 +259,9 @@ func makeEROFS(model, modelDir, mwpFile string) error {
 
 // formatVerity appends the dm-verity hash tree to the EROFS image and
 // writes the rootHash_hashOffset_uuid info file, if not already done.
+// The tree is built natively (see modelwrap.FormatVerityHashTree), with
+// output byte-identical to the veritysetup format invocation it replaced,
+// but hashing data blocks on all cores.
 func formatVerity(model, mwpFile, infoFile string) error {
 	if _, err := os.Stat(infoFile); err == nil {
 		fmt.Printf("dm-verity volume already exists at %s\n", mwpFile)
@@ -279,34 +284,25 @@ func formatVerity(model, mwpFile, infoFile string) error {
 	verityUUID := modelwrap.UUIDv5URL(model + "-inner")
 	salt := modelwrap.VeritySalt(model)
 
-	fmt.Printf("Running veritysetup on %s\n", mwpFile)
-	err = run(exec.Command(
-		"veritysetup",
-		fmt.Sprintf("--format=%d", modelwrap.VerityFormat),
-		"--hash="+modelwrap.VerityHashAlgorithm,
-		fmt.Sprintf("--data-block-size=%d", modelwrap.VerityDataBlockSize),
-		fmt.Sprintf("--hash-block-size=%d", modelwrap.VerityHashBlockSize),
-		"--salt="+hex.EncodeToString(salt),
-		"--uuid="+verityUUID,
-		fmt.Sprintf("--hash-offset=%d", offset),
-		"--root-hash-file="+infoFile,
-		"format",
-		mwpFile, // data device
-		mwpFile, // hash device
-	))
+	workers := runtime.GOMAXPROCS(0)
+	fmt.Printf("Building verity hash tree for %s (Go, %d workers)\n", mwpFile, workers)
+	rootHash, err := modelwrap.FormatVerityHashTree(mwpFile, modelwrap.VerityFormatParams{
+		Salt:       salt,
+		UUID:       verityUUID,
+		DataBlocks: uint64(offset) / modelwrap.VerityDataBlockSize,
+		HashOffset: uint64(offset),
+		Workers:    workers,
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("formatting dm-verity hash tree: %w", err)
 	}
+	fmt.Printf("Root hash: %s\n", hex.EncodeToString(rootHash))
 
-	f, err := os.OpenFile(infoFile, os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open dm-verity info file %s: %w", infoFile, err)
-	}
-	defer f.Close()
-	if _, err := fmt.Fprintf(f, "_%d_%s", offset, verityUUID); err != nil {
+	ref := fmt.Sprintf("%s_%d_%s", hex.EncodeToString(rootHash), offset, verityUUID)
+	if err := os.WriteFile(infoFile+".tmp", []byte(ref), 0644); err != nil {
 		return err
 	}
-	return nil
+	return os.Rename(infoFile+".tmp", infoFile)
 }
 
 // encryptEMWP wraps an MWP file into a GPT disk image whose single

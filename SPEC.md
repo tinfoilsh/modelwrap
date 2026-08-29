@@ -56,7 +56,7 @@ The verity mapping is always opened with `--no-superblock` and fully explicit pa
 - The hash tree starts at `hashOffset + 4096` (one hash block past the superblock slot).
 - The salt is `SHA256(<model identity>)` where the model identity is the packer's `name@revision` string, carried in the attested config as the required `repo` field. The consumer re-derives it; a wrong `repo` fails closed because nothing verifies against the attested root hash.
 
-The artifact still contains a dm-verity superblock at `hashOffset` (veritysetup writes one at format time), but consumers never read it: it is untrusted dead bytes occupying the first hash block.
+The artifact still contains a dm-verity superblock at `hashOffset` (the packer writes one at format time), but consumers never read it: it is untrusted dead bytes occupying the first hash block.
 
 The mount path is:
 
