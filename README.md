@@ -17,7 +17,7 @@ matching image digest.
 modelwrap mistralai/Ministral-3-3B-Instruct-2512@cfcb068fa7c44114cf77a462357c6cdcd2c304b4
 ```
 
-Delete the generated artifacts and downloaded cache for one pinned revision:
+Delete the generated artifacts and materialized snapshot for one pinned revision:
 
 ```sh
 modelwrap --delete mistralai/Ministral-3-3B-Instruct-2512@cfcb068fa7c44114cf77a462357c6cdcd2c304b4
@@ -36,7 +36,10 @@ PRIVATE_MODEL_KEY_B64="${PRIVATE_MODEL_KEY_B64}" modelwrap --model-dir /path/to/
 - `--encrypt`: emit encrypted modelwrap output (`.emwp`). Requires a master key via `--key-file` or `PRIVATE_MODEL_KEY_B64`.
 - `--key-file <path>`: file containing the base64-encoded 64-byte EMWP master key.
 - `--verify`: optional. Runs `veritysetup verify` for MWP and decrypts then verifies EMWP, which is useful for cached artifacts or release checks.
-- `--output <path>` / `--cache <path>`: output and download cache directories (default `./output`, `./cache`).
+- `--output <path>` / `--cache <path>`: output and download cache directories (default `./output`, `./cache`). Hugging Face blobs are content-addressed and shared across revisions, so unchanged weight shards are not downloaded again. Snapshot materialization uses reflinks when supported.
+
+`--delete` retains the shared Hugging Face blob cache because its contents may
+be referenced by other revisions. Use `hf cache` to inspect or prune that cache.
 - `--image <ref>`: override the packer container image the launcher runs (defaults to the release-pinned digest; also `MODELWRAP_IMAGE`).
 - `--local`: run the packer directly on the current machine instead of in a container. Artifact bytes then depend on locally installed tool versions.
 

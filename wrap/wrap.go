@@ -10,6 +10,7 @@ package wrap
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,11 +65,7 @@ func Pack(opts Options) (string, error) {
 		fmt.Printf("Using local model directory %s as %s\n", modelDir, model)
 	} else {
 		fmt.Printf("Downloading %s to %s\n", model, modelDir)
-		if err := downloadModel(modelName, modelCommit, modelDir, opts.HFToken); err != nil {
-			return "", err
-		}
-		// Remove the download cache for reproducibility.
-		if err := os.RemoveAll(filepath.Join(modelDir, ".cache")); err != nil {
+		if err := downloadModel(modelName, modelCommit, modelDir, opts.CacheDir, opts.HFToken); err != nil {
 			return "", err
 		}
 	}
@@ -223,14 +220,64 @@ func resolveHFRevision(model, token string) (string, error) {
 	return info.SHA, nil
 }
 
-// downloadModel fetches a model snapshot using the official `hf` CLI from
-// huggingface_hub, which handles auth, resume, and xet-backed transfers.
-func downloadModel(name, revision, dir, token string) error {
-	cmd := exec.Command("hf", "download", name, "--revision", revision, "--local-dir", dir)
+// downloadModel fetches a model snapshot into huggingface_hub's persistent,
+// content-addressed cache, then materializes a plain directory for mkfs.erofs.
+// The shared blob cache avoids downloading unchanged weight shards again when
+// a new revision changes only configuration or tokenizer files.
+func downloadModel(name, revision, dir, cacheDir, token string) error {
+	// Revision directories created here are atomic and immutable. This also
+	// preserves compatibility with complete directories made by older releases.
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		fmt.Printf("Using existing model snapshot %s\n", dir)
+		return nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	hubCacheDir := filepath.Join(cacheDir, "huggingface", "hub")
+	if err := os.MkdirAll(hubCacheDir, 0755); err != nil {
+		return err
+	}
+	cmd := exec.Command("hf", "download", name, "--revision", revision, "--cache-dir", hubCacheDir, "--quiet")
 	if token != "" {
 		cmd.Env = append(os.Environ(), "HF_TOKEN="+token)
 	}
-	return run(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("command failed: %s: %w: %s", strings.Join(cmd.Args, " "), err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return fmt.Errorf("running %s: %w", strings.Join(cmd.Args, " "), err)
+	}
+	snapshotDir := strings.TrimSpace(string(out))
+	if snapshotDir == "" {
+		return fmt.Errorf("hf download returned an empty snapshot path")
+	}
+	fi, err := os.Stat(snapshotDir)
+	if err != nil || !fi.IsDir() {
+		return fmt.Errorf("hf download returned invalid snapshot directory %q", snapshotDir)
+	}
+
+	// Hub snapshots contain symlinks into the blob cache. Dereference them so
+	// the EROFS image remains self-contained. Reflinks avoid a physical copy on
+	// filesystems that support copy-on-write; cp falls back to a normal copy.
+	tmpDir := dir + ".tmp"
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	copyCmd := exec.Command("cp", "--recursive", "--dereference", "--reflink=auto", "--preserve=mode", snapshotDir+string(os.PathSeparator)+".", tmpDir)
+	if err := run(copyCmd); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0755); err != nil {
+		return err
+	}
+	return os.Rename(tmpDir, dir)
 }
 
 // makeEROFS builds the deterministic EROFS image if it does not exist.
