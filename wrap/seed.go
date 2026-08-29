@@ -37,6 +37,15 @@ type lfsFile struct {
 // never a correctness gate: any failure falls back to the plain download,
 // and hf independently re-hashes files it finds without sidecar metadata
 // before skipping them.
+//
+// The hardlink model relies on hf never writing through an existing
+// destination path: the pinned huggingface_hub replaces files by renaming
+// a .incomplete temp over them. Its hub-cache-hit branch is the exception
+// — it shutil.copyfile()s onto the destination in place, which would
+// corrupt the seeded sibling through the shared inode. That branch is
+// unreachable in the packer container (ephemeral, --local-dir downloads
+// only, the hub cache is never populated); do not enable hub-cache reuse
+// without revisiting seeding.
 func seedFromPreviousRevisions(name, revision, modelDir, token string) {
 	siblings, err := siblingRevisionDirs(modelDir)
 	if err != nil || len(siblings) == 0 {
@@ -95,6 +104,14 @@ func siblingRevisionDirs(modelDir string) ([]string, error) {
 	return paths, nil
 }
 
+// Bounds on the tree listing so a misbehaving API response degrades into
+// a listing error (and therefore a plain unseeded download) instead of a
+// wedged or OOMing wrap job.
+const (
+	treeMaxPages    = 10000
+	treePageMaxSize = 64 << 20
+)
+
 // listLFSFiles enumerates the LFS files of one model revision via the Hub
 // tree API, following Link header pagination.
 func listLFSFiles(name, revision, token string) ([]lfsFile, error) {
@@ -107,7 +124,10 @@ func listLFSFiles(name, revision, token string) ([]lfsFile, error) {
 
 	client := &http.Client{Timeout: 2 * time.Minute}
 	var files []lfsFile
-	for pageURL != "" {
+	for pages := 0; pageURL != ""; pages++ {
+		if pages == treeMaxPages {
+			return nil, fmt.Errorf("listing files of %s@%s: more than %d pages", name, revision, treeMaxPages)
+		}
 		req, err := http.NewRequest("GET", pageURL, nil)
 		if err != nil {
 			return nil, err
@@ -131,7 +151,7 @@ func listLFSFiles(name, revision, token string) ([]lfsFile, error) {
 				Size int64  `json:"size"`
 			} `json:"lfs"`
 		}
-		err = json.NewDecoder(resp.Body).Decode(&page)
+		err = json.NewDecoder(io.LimitReader(resp.Body, treePageMaxSize)).Decode(&page)
 		resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("decoding file list of %s@%s: %w", name, revision, err)
@@ -159,6 +179,13 @@ func nextPageURL(header http.Header) string {
 	}
 	return ""
 }
+
+// seedFileMode is the mode hf gives downloaded files in the packer
+// container (0666 &^ the 022 umask). mkfs.erofs stores permission bits,
+// so seeding a file with any other mode would break seeded==cold byte
+// identity. Chmod is not an option: it would write through the shared
+// inode into the sibling revision.
+const seedFileMode = 0o644
 
 // seedFiles hardlinks each wanted file from the first sibling revision
 // whose copy matches the expected SHA256, hashing candidates in parallel
@@ -196,16 +223,21 @@ func seedFiles(files []lfsFile, siblings []string, modelDir string) (int, int64,
 					if err != nil || !fi.Mode().IsRegular() || fi.Size() != file.Size {
 						continue
 					}
-					if !fileMatchesSHA256(candidate, file.SHA256, buf) {
+					if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 						continue
 					}
-					if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-						break
-					}
-					// Same filesystem by construction; if linking still
-					// fails, download instead — never copy silently.
+					// Link first, verify after: every check runs on the
+					// pinned target inode, so a concurrent re-download
+					// replacing the sibling path cannot swap in an
+					// unverified file between hash and link. Same
+					// filesystem by construction; if linking fails,
+					// download instead — never copy silently.
 					if err := os.Link(candidate, target); err != nil {
-						break
+						continue
+					}
+					if !seedTargetValid(target, file, buf) {
+						os.Remove(target)
+						continue
 					}
 					results[t] = result{true, file.Size, filepath.Base(sibling)}
 					break
@@ -234,10 +266,15 @@ func seedFiles(files []lfsFile, siblings []string, modelDir string) (int, int64,
 	return linked, linkedBytes, sources
 }
 
-// fileMatchesSHA256 reports whether the full content of the file at path
-// hashes to wantHex.
-func fileMatchesSHA256(path, wantHex string, buf []byte) bool {
-	f, err := os.Open(path)
+// seedTargetValid reports whether the freshly linked seed target is a
+// regular file with the expected mode and size whose full content hashes
+// to the expected SHA256.
+func seedTargetValid(target string, file lfsFile, buf []byte) bool {
+	fi, err := os.Lstat(target)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() != file.Size || fi.Mode().Perm() != seedFileMode {
+		return false
+	}
+	f, err := os.Open(target)
 	if err != nil {
 		return false
 	}
@@ -253,5 +290,5 @@ func fileMatchesSHA256(path, wantHex string, buf []byte) bool {
 			return false
 		}
 	}
-	return hex.EncodeToString(h.Sum(nil)) == strings.ToLower(wantHex)
+	return hex.EncodeToString(h.Sum(nil)) == strings.ToLower(file.SHA256)
 }

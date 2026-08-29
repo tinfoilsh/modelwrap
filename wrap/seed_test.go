@@ -95,6 +95,52 @@ func TestSeedFilesHardlinksOnlyVerifiedMatches(t *testing.T) {
 	}
 }
 
+// A candidate whose content does not hash to the expected SHA256 is
+// verified through the already-created link (so the checked inode is the
+// pinned one) and the link is removed again, leaving the sibling intact.
+func TestSeedFilesUnlinksHashMismatch(t *testing.T) {
+	cache := t.TempDir()
+	sibling := filepath.Join(cache, "revA")
+	target := filepath.Join(cache, "revB")
+	bad := []byte("right size, bad data")
+	writeFiles(t, sibling, map[string][]byte{"weights.bin": bad})
+
+	files := []lfsFile{{Path: "weights.bin", SHA256: sha256Hex([]byte("the expected contents")), Size: int64(len(bad))}}
+	linked, linkedBytes, sources := seedFiles(files, []string{sibling}, target)
+	if linked != 0 || linkedBytes != 0 || len(sources) != 0 {
+		t.Errorf("linked = %d, %d bytes, sources %v; want nothing seeded", linked, linkedBytes, sources)
+	}
+	if _, err := os.Lstat(filepath.Join(target, "weights.bin")); !os.IsNotExist(err) {
+		t.Error("mismatched hardlink was not removed from the target dir")
+	}
+	got, err := os.ReadFile(filepath.Join(sibling, "weights.bin"))
+	if err != nil || string(got) != string(bad) {
+		t.Errorf("sibling file disturbed: %q, %v", got, err)
+	}
+}
+
+// hf downloads are always 0644 and mkfs.erofs stores permission bits, so a
+// sibling copy with any other mode must not be seeded even if the content
+// matches: it would break seeded==cold byte identity.
+func TestSeedFilesSkipsNonStandardMode(t *testing.T) {
+	cache := t.TempDir()
+	sibling := filepath.Join(cache, "revA")
+	target := filepath.Join(cache, "revB")
+	content := []byte("correct contents")
+	writeFiles(t, sibling, map[string][]byte{"weights.bin": content})
+	if err := os.Chmod(filepath.Join(sibling, "weights.bin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	files := []lfsFile{{Path: "weights.bin", SHA256: sha256Hex(content), Size: int64(len(content))}}
+	if linked, _, _ := seedFiles(files, []string{sibling}, target); linked != 0 {
+		t.Errorf("linked = %d, want 0 for non-0644 sibling", linked)
+	}
+	if _, err := os.Lstat(filepath.Join(target, "weights.bin")); !os.IsNotExist(err) {
+		t.Error("0600 sibling file should not have been seeded")
+	}
+}
+
 func TestSeedFilesPrefersMostRecentSibling(t *testing.T) {
 	cache := t.TempDir()
 	content := []byte("identical everywhere")
