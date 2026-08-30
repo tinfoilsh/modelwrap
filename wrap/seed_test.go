@@ -161,6 +161,47 @@ func TestSeedFilesSkipsNonStandardMode(t *testing.T) {
 	}
 }
 
+// The mode gate compares the full mode, not just permission bits: a
+// candidate with correct 0644 perms but a setgid/sticky bit must not be
+// seeded — mkfs.erofs stores the whole inode mode.
+func TestSeedFilesSkipsSpecialModeBits(t *testing.T) {
+	cache := t.TempDir()
+	sibling := filepath.Join(cache, "revA")
+	target := filepath.Join(cache, "revB")
+	content := []byte("correct contents")
+	writeFiles(t, sibling, map[string][]byte{"weights.bin": content})
+	path := filepath.Join(sibling, "weights.bin")
+
+	// Sticky first, setgid as fallback: unlike setuid, one of these
+	// survives an unprivileged chmod in common test environments.
+	var special os.FileMode
+	for _, bit := range []os.FileMode{os.ModeSticky, os.ModeSetgid} {
+		if err := os.Chmod(path, bit|0o644); err != nil {
+			continue
+		}
+		if fi, err := os.Lstat(path); err == nil && fi.Mode()&bit != 0 {
+			special = bit
+			break
+		}
+	}
+	if special == 0 {
+		t.Skip("environment strips special mode bits from files")
+	}
+
+	files := []lfsFile{{Path: "weights.bin", SHA256: sha256Hex(content), Size: int64(len(content))}}
+	if linked, _, _, err := seedFiles(files, []string{sibling}, target, 0o644); err != nil || linked != 0 {
+		t.Errorf("linked = %d (err %v), want 0 for special-bit sibling", linked, err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, "weights.bin")); !os.IsNotExist(err) {
+		t.Error("special-bit sibling file should not have been seeded")
+	}
+	// The authoritative post-link check must reject it too, independent of
+	// the candidate prefilter.
+	if seedTargetValid(path, files[0], 0o644, make([]byte, 1<<10)) {
+		t.Error("seedTargetValid accepted a file with a special mode bit")
+	}
+}
+
 // An invalid candidate in the newest sibling is unlinked again and must
 // not stop an older sibling's valid copy from being seeded.
 func TestSeedFilesTriesNextSiblingAfterMismatch(t *testing.T) {

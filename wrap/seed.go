@@ -191,13 +191,14 @@ func nextPageURL(header http.Header) string {
 	return ""
 }
 
-// probeDownloadMode returns the permission bits hf gives files it
-// downloads here (0666 &^ the process umask), determined the way
-// huggingface_hub itself probes them: by creating a scratch file. Only
-// files with exactly these bits may be seeded — mkfs.erofs stores
-// permission bits, so a sibling copy from a different-umask era would
-// fork the seeded roothash from a cold wrap's. Chmod is not an option:
-// it would write through the shared inode into the sibling revision.
+// probeDownloadMode returns the full file mode hf gives files it
+// downloads here (a regular file, 0666 &^ the process umask, no special
+// bits), determined the way huggingface_hub itself probes it: by creating
+// a scratch file. Only files with exactly this mode may be seeded —
+// mkfs.erofs stores the whole inode mode, so a sibling copy from a
+// different-umask era, or one with a setuid/setgid/sticky bit, would fork
+// the seeded roothash from a cold wrap's. Chmod is not an option: it
+// would write through the shared inode into the sibling revision.
 // The probe lives under the revision's .cache dir, which Pack always
 // removes before the image is built, so it can never leak into the
 // artifact even if a killed run leaves it behind.
@@ -223,7 +224,7 @@ func probeDownloadMode(modelDir string) (os.FileMode, error) {
 	if err != nil {
 		return 0, err
 	}
-	return fi.Mode().Perm(), nil
+	return fi.Mode(), nil
 }
 
 // removeSeedTarget is a variable so tests can force the unremovable-file
@@ -268,7 +269,7 @@ func seedFiles(files []lfsFile, siblings []string, modelDir string, mode os.File
 				for _, sibling := range siblings {
 					candidate := filepath.Join(sibling, filepath.FromSlash(file.Path))
 					fi, err := os.Lstat(candidate)
-					if err != nil || !fi.Mode().IsRegular() || fi.Size() != file.Size {
+					if err != nil || fi.Mode() != mode || fi.Size() != file.Size {
 						continue
 					}
 					// 0777 &^ umask matches hf's own dir creation, see
@@ -329,12 +330,13 @@ func seedFiles(files []lfsFile, siblings []string, modelDir string, mode os.File
 	return linked, linkedBytes, sources, nil
 }
 
-// seedTargetValid reports whether the freshly linked seed target is a
-// regular file with the expected mode and size whose full content hashes
-// to the expected SHA256.
+// seedTargetValid reports whether the freshly linked seed target has
+// exactly the probed full mode (which subsumes being a regular file
+// without special bits) and expected size, and content that hashes to the
+// expected SHA256.
 func seedTargetValid(target string, file lfsFile, mode os.FileMode, buf []byte) bool {
 	fi, err := os.Lstat(target)
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() != file.Size || fi.Mode().Perm() != mode {
+	if err != nil || fi.Mode() != mode || fi.Size() != file.Size {
 		return false
 	}
 	f, err := os.Open(target)
