@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/tinfoilsh/modelwrap"
@@ -29,6 +30,14 @@ const (
 	// intentional, update this constant and treat it as a breaking change for
 	// every already-enrolled artifact hash.
 	integrationExpectedRef = "17c6605f3becf63a63da37cc6958b2d18f8abc750f9f546b9f57133db40c4326_2142208_9701bf21-6de2-59a2-bdea-141aaae05fc3"
+
+	// Tiny public model with two revisions that share LFS files:
+	// seedRevisionNew is the child of seedRevisionOld and only adds
+	// flax_model.msgpack, leaving pytorch_model.bin and tf_model.h5
+	// identical, so packing old-then-new exercises download seeding.
+	seedModelName   = "sshleifer/tiny-gpt2"
+	seedRevisionOld = "f42686d7a97d000446a173ab001673a12e156924"
+	seedRevisionNew = "5f91d94bd9cd7190a9f3216ff93cd1dd95f2c7be"
 )
 
 // TestEMWPRoundTripIntegration downloads and packs a tiny public model as
@@ -373,6 +382,166 @@ func TestMWPSuperblockTamperIntegration(t *testing.T) {
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatal("mounted file content mismatch")
+	}
+}
+
+// TestSeededWrapMatchesColdWrap is the hash-neutrality differential test
+// for cross-revision download seeding: a wrap whose download was seeded
+// with hardlinks from a previous revision must produce artifacts
+// byte-identical to a cold wrap of the same revision. It also proves the
+// seeding path actually engaged: hf never hardlinks, so shared weights
+// being the same inode across revision cache dirs can only come from the
+// seeder. Needs network and the packer toolchain (run via test/e2e.sh).
+func TestSeededWrapMatchesColdWrap(t *testing.T) {
+	if os.Getenv("TINFOIL_MODELWRAP_INTEGRATION") != "1" {
+		t.Skip("set TINFOIL_MODELWRAP_INTEGRATION=1 to run")
+	}
+
+	packMWP := func(work, model string) string {
+		t.Helper()
+		ref, err := wrap.Pack(wrap.Options{
+			Model:     model,
+			CacheDir:  filepath.Join(work, "cache"),
+			OutputDir: filepath.Join(work, "output"),
+			Verify:    true,
+		})
+		if err != nil {
+			t.Fatalf("packing %s: %v", model, err)
+		}
+		return ref
+	}
+
+	// captureStdout redirects os.Stdout until the returned finish func is
+	// called and returns everything written in between, re-emitting it to
+	// the real stdout so the run log stays intact. finish is idempotent
+	// and must be deferred: t.Fatal or a panic inside the capture window
+	// then restores stdout instead of wedging the test binary once the
+	// unread pipe fills. Swap and restore happen on this goroutine with
+	// Pack running synchronously in between, and no writer outlives Pack
+	// (it waits on its hf subprocess, whose dup of the pipe fd closes with
+	// it), so the reader always reaches EOF once the write end closes.
+	captureStdout := func() func() string {
+		t.Helper()
+		orig := os.Stdout
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Stdout = w
+		captured := make(chan string, 1)
+		go func() {
+			var buf bytes.Buffer
+			_, _ = io.Copy(&buf, r)
+			r.Close()
+			captured <- buf.String()
+		}()
+		var out string
+		var once sync.Once
+		return func() string {
+			once.Do(func() {
+				os.Stdout = orig
+				w.Close()
+				out = <-captured
+				fmt.Print(out)
+			})
+			return out
+		}
+	}
+
+	// packMWPCaptured packs like packMWP but also captures everything the
+	// packer (and its hf subprocess) writes to stdout, so a missing
+	// seeding engagement can be attributed below.
+	packMWPCaptured := func(work, model string) (string, string) {
+		t.Helper()
+		finish := captureStdout()
+		defer finish()
+		ref, packErr := wrap.Pack(wrap.Options{
+			Model:     model,
+			CacheDir:  filepath.Join(work, "cache"),
+			OutputDir: filepath.Join(work, "output"),
+			Verify:    true,
+		})
+		out := finish()
+		if packErr != nil {
+			t.Fatalf("packing %s: %v", model, packErr)
+		}
+		return ref, out
+	}
+
+	newModel := seedModelName + "@" + seedRevisionNew
+	coldWork := t.TempDir()
+	coldRef := packMWP(coldWork, newModel)
+
+	// Same revision again, but with the old revision already in the cache
+	// so the download is seeded.
+	seedWork := t.TempDir()
+	packMWP(seedWork, seedModelName+"@"+seedRevisionOld)
+
+	// seedingEngaged proves the seeding path actually ran: hf never
+	// hardlinks, so shared weights being the same inode across revision
+	// cache dirs can only come from the seeder.
+	seedingEngaged := func() bool {
+		for _, name := range []string{"pytorch_model.bin", "tf_model.h5"} {
+			oldFi, err := os.Stat(filepath.Join(seedWork, "cache", seedModelName, seedRevisionOld, name))
+			if err != nil {
+				return false
+			}
+			newFi, err := os.Stat(filepath.Join(seedWork, "cache", seedModelName, seedRevisionNew, name))
+			if err != nil {
+				return false
+			}
+			if !os.SameFile(oldFi, newFi) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Seeding degrades to a plain download on a transient Hub tree-API
+	// failure, which would leave this differential trivially green without
+	// exercising the mechanism. Two-tier policy: retry with a clean target
+	// revision, then skip — loudly — only if the captured packer output
+	// shows the seeder's own skip line; anything else is a mechanism
+	// regression and fails hard. An unconditional skip is forbidden: it
+	// would let a full seeding regression hide behind green CI.
+	var seededRef string
+	for attempt := 1; ; attempt++ {
+		var out string
+		seededRef, out = packMWPCaptured(seedWork, newModel)
+		if seedingEngaged() {
+			break
+		}
+		if attempt == 3 {
+			if strings.Contains(out, "Not seeding") {
+				t.Skipf("seeding never engaged after %d attempts — Hub tree API unavailable; differential not exercised this run\n%s", attempt, out)
+			}
+			t.Fatalf("seeding did not engage and the packer reported no seeding failure — mechanism regression, not Hub weather:\n%s", out)
+		}
+		if err := wrap.Delete(wrap.DeleteOptions{
+			Model:     newModel,
+			CacheDir:  filepath.Join(seedWork, "cache"),
+			OutputDir: filepath.Join(seedWork, "output"),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if seededRef != coldRef {
+		t.Errorf("seeded ref = %s, cold ref = %s: seeding changed the attested identity", seededRef, coldRef)
+	}
+	for _, suffix := range []string{".mpk", ".info"} {
+		rel := filepath.Join("output", seedModelName, seedRevisionNew+suffix)
+		cold, err := os.ReadFile(filepath.Join(coldWork, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		seeded, err := os.ReadFile(filepath.Join(seedWork, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(cold, seeded) {
+			t.Errorf("seeded %s differs from cold wrap (first diff at byte %d)", rel, firstDiffIdx(seeded, cold))
+		}
 	}
 }
 
