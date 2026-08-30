@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/tinfoilsh/modelwrap"
@@ -410,11 +411,16 @@ func TestSeededWrapMatchesColdWrap(t *testing.T) {
 		return ref
 	}
 
-	// packMWPCaptured packs like packMWP but also captures everything the
-	// packer (and its hf subprocess) writes to stdout, so a missing
-	// seeding engagement can be attributed below. The output is re-emitted
-	// to keep the run log intact.
-	packMWPCaptured := func(work, model string) (string, string) {
+	// captureStdout redirects os.Stdout until the returned finish func is
+	// called and returns everything written in between, re-emitting it to
+	// the real stdout so the run log stays intact. finish is idempotent
+	// and must be deferred: t.Fatal or a panic inside the capture window
+	// then restores stdout instead of wedging the test binary once the
+	// unread pipe fills. Swap and restore happen on this goroutine with
+	// Pack running synchronously in between, and no writer outlives Pack
+	// (it waits on its hf subprocess, whose dup of the pipe fd closes with
+	// it), so the reader always reaches EOF once the write end closes.
+	captureStdout := func() func() string {
 		t.Helper()
 		orig := os.Stdout
 		r, w, err := os.Pipe()
@@ -422,23 +428,40 @@ func TestSeededWrapMatchesColdWrap(t *testing.T) {
 			t.Fatal(err)
 		}
 		os.Stdout = w
-		captured := make(chan string)
+		captured := make(chan string, 1)
 		go func() {
 			var buf bytes.Buffer
 			_, _ = io.Copy(&buf, r)
+			r.Close()
 			captured <- buf.String()
 		}()
+		var out string
+		var once sync.Once
+		return func() string {
+			once.Do(func() {
+				os.Stdout = orig
+				w.Close()
+				out = <-captured
+				fmt.Print(out)
+			})
+			return out
+		}
+	}
+
+	// packMWPCaptured packs like packMWP but also captures everything the
+	// packer (and its hf subprocess) writes to stdout, so a missing
+	// seeding engagement can be attributed below.
+	packMWPCaptured := func(work, model string) (string, string) {
+		t.Helper()
+		finish := captureStdout()
+		defer finish()
 		ref, packErr := wrap.Pack(wrap.Options{
 			Model:     model,
 			CacheDir:  filepath.Join(work, "cache"),
 			OutputDir: filepath.Join(work, "output"),
 			Verify:    true,
 		})
-		w.Close()
-		os.Stdout = orig
-		out := <-captured
-		r.Close()
-		fmt.Print(out)
+		out := finish()
 		if packErr != nil {
 			t.Fatalf("packing %s: %v", model, packErr)
 		}
