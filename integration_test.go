@@ -410,6 +410,41 @@ func TestSeededWrapMatchesColdWrap(t *testing.T) {
 		return ref
 	}
 
+	// packMWPCaptured packs like packMWP but also captures everything the
+	// packer (and its hf subprocess) writes to stdout, so a missing
+	// seeding engagement can be attributed below. The output is re-emitted
+	// to keep the run log intact.
+	packMWPCaptured := func(work, model string) (string, string) {
+		t.Helper()
+		orig := os.Stdout
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Stdout = w
+		captured := make(chan string)
+		go func() {
+			var buf bytes.Buffer
+			_, _ = io.Copy(&buf, r)
+			captured <- buf.String()
+		}()
+		ref, packErr := wrap.Pack(wrap.Options{
+			Model:     model,
+			CacheDir:  filepath.Join(work, "cache"),
+			OutputDir: filepath.Join(work, "output"),
+			Verify:    true,
+		})
+		w.Close()
+		os.Stdout = orig
+		out := <-captured
+		r.Close()
+		fmt.Print(out)
+		if packErr != nil {
+			t.Fatalf("packing %s: %v", model, packErr)
+		}
+		return ref, out
+	}
+
 	newModel := seedModelName + "@" + seedRevisionNew
 	coldWork := t.TempDir()
 	coldRef := packMWP(coldWork, newModel)
@@ -418,7 +453,55 @@ func TestSeededWrapMatchesColdWrap(t *testing.T) {
 	// so the download is seeded.
 	seedWork := t.TempDir()
 	packMWP(seedWork, seedModelName+"@"+seedRevisionOld)
-	seededRef := packMWP(seedWork, newModel)
+
+	// seedingEngaged proves the seeding path actually ran: hf never
+	// hardlinks, so shared weights being the same inode across revision
+	// cache dirs can only come from the seeder.
+	seedingEngaged := func() bool {
+		for _, name := range []string{"pytorch_model.bin", "tf_model.h5"} {
+			oldFi, err := os.Stat(filepath.Join(seedWork, "cache", seedModelName, seedRevisionOld, name))
+			if err != nil {
+				return false
+			}
+			newFi, err := os.Stat(filepath.Join(seedWork, "cache", seedModelName, seedRevisionNew, name))
+			if err != nil {
+				return false
+			}
+			if !os.SameFile(oldFi, newFi) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Seeding degrades to a plain download on a transient Hub tree-API
+	// failure, which would leave this differential trivially green without
+	// exercising the mechanism. Two-tier policy: retry with a clean target
+	// revision, then skip — loudly — only if the captured packer output
+	// shows the seeder's own skip line; anything else is a mechanism
+	// regression and fails hard. An unconditional skip is forbidden: it
+	// would let a full seeding regression hide behind green CI.
+	var seededRef string
+	for attempt := 1; ; attempt++ {
+		var out string
+		seededRef, out = packMWPCaptured(seedWork, newModel)
+		if seedingEngaged() {
+			break
+		}
+		if attempt == 3 {
+			if strings.Contains(out, "Not seeding") {
+				t.Skipf("seeding never engaged after %d attempts — Hub tree API unavailable; differential not exercised this run\n%s", attempt, out)
+			}
+			t.Fatalf("seeding did not engage and the packer reported no seeding failure — mechanism regression, not Hub weather:\n%s", out)
+		}
+		if err := wrap.Delete(wrap.DeleteOptions{
+			Model:     newModel,
+			CacheDir:  filepath.Join(seedWork, "cache"),
+			OutputDir: filepath.Join(seedWork, "output"),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	if seededRef != coldRef {
 		t.Errorf("seeded ref = %s, cold ref = %s: seeding changed the attested identity", seededRef, coldRef)
@@ -435,20 +518,6 @@ func TestSeededWrapMatchesColdWrap(t *testing.T) {
 		}
 		if !bytes.Equal(cold, seeded) {
 			t.Errorf("seeded %s differs from cold wrap (first diff at byte %d)", rel, firstDiffIdx(seeded, cold))
-		}
-	}
-
-	for _, name := range []string{"pytorch_model.bin", "tf_model.h5"} {
-		oldFi, err := os.Stat(filepath.Join(seedWork, "cache", seedModelName, seedRevisionOld, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		newFi, err := os.Stat(filepath.Join(seedWork, "cache", seedModelName, seedRevisionNew, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !os.SameFile(oldFi, newFi) {
-			t.Errorf("%s was re-downloaded, not seeded: the test did not exercise the seeding path", name)
 		}
 	}
 }
