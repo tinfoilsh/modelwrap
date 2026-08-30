@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,6 +18,8 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// writeFiles writes fixtures and chmods them to exactly 0o644 so tests are
+// deterministic under any umask.
 func writeFiles(t *testing.T, dir string, files map[string][]byte) {
 	t.Helper()
 	for name, content := range files {
@@ -25,6 +28,9 @@ func writeFiles(t *testing.T, dir string, files map[string][]byte) {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(path, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -70,7 +76,10 @@ func TestSeedFilesHardlinksOnlyVerifiedMatches(t *testing.T) {
 		{Path: "missing.bin", SHA256: sha256Hex([]byte("never downloaded")), Size: 16},
 		{Path: "already-there.bin", SHA256: sha256Hex([]byte("sibling copy")), Size: 12},
 	}
-	linked, linkedBytes, sources := seedFiles(files, []string{sibling}, target)
+	linked, linkedBytes, sources, err := seedFiles(files, []string{sibling}, target, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if linked != 2 {
 		t.Errorf("linked = %d, want 2", linked)
@@ -106,7 +115,10 @@ func TestSeedFilesUnlinksHashMismatch(t *testing.T) {
 	writeFiles(t, sibling, map[string][]byte{"weights.bin": bad})
 
 	files := []lfsFile{{Path: "weights.bin", SHA256: sha256Hex([]byte("the expected contents")), Size: int64(len(bad))}}
-	linked, linkedBytes, sources := seedFiles(files, []string{sibling}, target)
+	linked, linkedBytes, sources, err := seedFiles(files, []string{sibling}, target, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if linked != 0 || linkedBytes != 0 || len(sources) != 0 {
 		t.Errorf("linked = %d, %d bytes, sources %v; want nothing seeded", linked, linkedBytes, sources)
 	}
@@ -119,25 +131,78 @@ func TestSeedFilesUnlinksHashMismatch(t *testing.T) {
 	}
 }
 
-// hf downloads are always 0644 and mkfs.erofs stores permission bits, so a
-// sibling copy with any other mode must not be seeded even if the content
-// matches: it would break seeded==cold byte identity.
+// mkfs.erofs stores permission bits, so a sibling copy whose mode differs
+// from what a fresh download would get today (probed at runtime) must not
+// be seeded even if the content matches: it would break seeded==cold byte
+// identity.
 func TestSeedFilesSkipsNonStandardMode(t *testing.T) {
 	cache := t.TempDir()
 	sibling := filepath.Join(cache, "revA")
 	target := filepath.Join(cache, "revB")
 	content := []byte("correct contents")
 	writeFiles(t, sibling, map[string][]byte{"weights.bin": content})
-	if err := os.Chmod(filepath.Join(sibling, "weights.bin"), 0o600); err != nil {
+
+	mode, err := probeDownloadMode(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A mode from a different umask era: flip the group/world read bits so
+	// it differs from the probed mode regardless of the test environment.
+	if err := os.Chmod(filepath.Join(sibling, "weights.bin"), mode^0o044); err != nil {
 		t.Fatal(err)
 	}
 
 	files := []lfsFile{{Path: "weights.bin", SHA256: sha256Hex(content), Size: int64(len(content))}}
-	if linked, _, _ := seedFiles(files, []string{sibling}, target); linked != 0 {
-		t.Errorf("linked = %d, want 0 for non-0644 sibling", linked)
+	if linked, _, _, err := seedFiles(files, []string{sibling}, target, mode); err != nil || linked != 0 {
+		t.Errorf("linked = %d (err %v), want 0 for mode-drifted sibling", linked, err)
 	}
 	if _, err := os.Lstat(filepath.Join(target, "weights.bin")); !os.IsNotExist(err) {
-		t.Error("0600 sibling file should not have been seeded")
+		t.Error("mode-drifted sibling file should not have been seeded")
+	}
+}
+
+// An invalid candidate in the newest sibling is unlinked again and must
+// not stop an older sibling's valid copy from being seeded.
+func TestSeedFilesTriesNextSiblingAfterMismatch(t *testing.T) {
+	cache := t.TempDir()
+	newer := filepath.Join(cache, "newer")
+	older := filepath.Join(cache, "older")
+	target := filepath.Join(cache, "target")
+	content := []byte("the expected contents")
+	writeFiles(t, newer, map[string][]byte{"weights.bin": []byte("right size, bad data!")})
+	writeFiles(t, older, map[string][]byte{"weights.bin": content})
+
+	files := []lfsFile{{Path: "weights.bin", SHA256: sha256Hex(content), Size: int64(len(content))}}
+	linked, _, sources, err := seedFiles(files, []string{newer, older}, target, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linked != 1 || len(sources) != 1 || sources[0] != "older" {
+		t.Errorf("linked = %d, sources = %v; want 1 file from older", linked, sources)
+	}
+	mustSameFile(t, filepath.Join(target, "weights.bin"), filepath.Join(older, "weights.bin"))
+}
+
+// If an unverified link cannot be removed again, seeding must fail the
+// wrap instead of leaving a file hf may trust unverified.
+func TestSeedFilesFatalWhenUnverifiedFileUnremovable(t *testing.T) {
+	oldRemove := removeSeedTarget
+	removeSeedTarget = func(string) error { return fmt.Errorf("injected remove failure") }
+	defer func() { removeSeedTarget = oldRemove }()
+
+	cache := t.TempDir()
+	sibling := filepath.Join(cache, "revA")
+	target := filepath.Join(cache, "revB")
+	bad := []byte("right size, bad data")
+	writeFiles(t, sibling, map[string][]byte{"weights.bin": bad})
+
+	files := []lfsFile{{Path: "weights.bin", SHA256: sha256Hex([]byte("the expected contents")), Size: int64(len(bad))}}
+	linked, _, _, err := seedFiles(files, []string{sibling}, target, 0o644)
+	if err == nil || !strings.Contains(err.Error(), "unverified") {
+		t.Fatalf("err = %v, want fatal unverified-file error", err)
+	}
+	if linked != 0 {
+		t.Errorf("linked = %d, want 0 on fatal error", linked)
 	}
 }
 
@@ -162,7 +227,10 @@ func TestSeedFilesPrefersMostRecentSibling(t *testing.T) {
 	}
 
 	files := []lfsFile{{Path: "weights.bin", SHA256: sha256Hex(content), Size: int64(len(content))}}
-	linked, _, sources := seedFiles(files, siblings, target)
+	linked, _, sources, err := seedFiles(files, siblings, target, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if linked != 1 || len(sources) != 1 || sources[0] != "newer" {
 		t.Errorf("linked = %d, sources = %v, want 1 file from newer", linked, sources)
 	}
@@ -187,7 +255,7 @@ func TestDeleteLeavesSeededSiblingIntact(t *testing.T) {
 	writeFiles(t, sibling, map[string][]byte{"weights.bin": content})
 
 	files := []lfsFile{{Path: "weights.bin", SHA256: sha256Hex(content), Size: int64(len(content))}}
-	if linked, _, _ := seedFiles(files, []string{sibling}, target); linked != 1 {
+	if linked, _, _, err := seedFiles(files, []string{sibling}, target, 0o644); err != nil || linked != 1 {
 		t.Fatal("seeding failed")
 	}
 

@@ -46,21 +46,32 @@ type lfsFile struct {
 // unreachable in the packer container (ephemeral, --local-dir downloads
 // only, the hub cache is never populated); do not enable hub-cache reuse
 // without revisiting seeding.
-func seedFromPreviousRevisions(name, revision, modelDir, token string) {
+// It returns an error only when it leaves the target dir in a state that
+// must not be packed; every other failure just skips seeding.
+func seedFromPreviousRevisions(name, revision, modelDir, token string) error {
 	siblings, err := siblingRevisionDirs(modelDir)
 	if err != nil || len(siblings) == 0 {
-		return
+		return nil
+	}
+	mode, err := probeDownloadMode(modelDir)
+	if err != nil {
+		fmt.Printf("Not seeding %s from previous revisions: probing download mode: %v\n", revision, err)
+		return nil
 	}
 	files, err := listLFSFiles(name, revision, token)
 	if err != nil {
 		fmt.Printf("Not seeding %s from previous revisions: %v\n", revision, err)
-		return
+		return nil
 	}
-	linked, linkedBytes, sources := seedFiles(files, siblings, modelDir)
+	linked, linkedBytes, sources, err := seedFiles(files, siblings, modelDir, mode)
+	if err != nil {
+		return err
+	}
 	if linked > 0 {
 		fmt.Printf("Seeded %d of %d LFS files (%s) from %s; downloading the remaining %d\n",
 			linked, len(files), formatSize(linkedBytes), strings.Join(sources, ", "), len(files)-linked)
 	}
+	return nil
 }
 
 func formatSize(n int64) string {
@@ -180,19 +191,52 @@ func nextPageURL(header http.Header) string {
 	return ""
 }
 
-// seedFileMode is the mode hf gives downloaded files in the packer
-// container (0666 &^ the 022 umask). mkfs.erofs stores permission bits,
-// so seeding a file with any other mode would break seeded==cold byte
-// identity. Chmod is not an option: it would write through the shared
-// inode into the sibling revision.
-const seedFileMode = 0o644
+// probeDownloadMode returns the permission bits hf gives files it
+// downloads here (0666 &^ the process umask), determined the way
+// huggingface_hub itself probes them: by creating a scratch file. Only
+// files with exactly these bits may be seeded — mkfs.erofs stores
+// permission bits, so a sibling copy from a different-umask era would
+// fork the seeded roothash from a cold wrap's. Chmod is not an option:
+// it would write through the shared inode into the sibling revision.
+// The probe lives under the revision's .cache dir, which Pack always
+// removes before the image is built, so it can never leak into the
+// artifact even if a killed run leaves it behind.
+func probeDownloadMode(modelDir string) (os.FileMode, error) {
+	// 0777 &^ umask matches how hf's pathlib mkdir creates missing dirs,
+	// so directories the seeder creates first (including the packed model
+	// root) get the same stored mode a cold wrap's would.
+	cacheDir := filepath.Join(modelDir, ".cache")
+	if err := os.MkdirAll(cacheDir, 0o777); err != nil {
+		return 0, err
+	}
+	probe := filepath.Join(cacheDir, ".seed-mode-probe")
+	if err := os.Remove(probe); err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o666)
+	if err != nil {
+		return 0, err
+	}
+	defer os.Remove(probe)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return fi.Mode().Perm(), nil
+}
+
+// removeSeedTarget is a variable so tests can force the unremovable-file
+// failure path.
+var removeSeedTarget = os.Remove
 
 // seedFiles hardlinks each wanted file from the first sibling revision
 // whose copy matches the expected SHA256, hashing candidates in parallel
 // across a worker pool. Files already present in modelDir are left for hf
 // to resolve. Returns the linked file count, their total size, and the
-// sibling revisions used.
-func seedFiles(files []lfsFile, siblings []string, modelDir string) (int, int64, []string) {
+// sibling revisions used. The only error is an unverified link that could
+// not be removed again; it must fail the wrap.
+func seedFiles(files []lfsFile, siblings []string, modelDir string, mode os.FileMode) (int, int64, []string, error) {
 	type result struct {
 		linked bool
 		size   int64
@@ -200,8 +244,12 @@ func seedFiles(files []lfsFile, siblings []string, modelDir string) (int, int64,
 	}
 	results := make([]result, len(files))
 
-	var next atomic.Uint64
-	var wg sync.WaitGroup
+	var (
+		next     atomic.Uint64
+		errOnce  sync.Once
+		firstErr error
+		wg       sync.WaitGroup
+	)
 	for range min(runtime.GOMAXPROCS(0), len(files)) {
 		wg.Add(1)
 		go func() {
@@ -223,7 +271,9 @@ func seedFiles(files []lfsFile, siblings []string, modelDir string) (int, int64,
 					if err != nil || !fi.Mode().IsRegular() || fi.Size() != file.Size {
 						continue
 					}
-					if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+					// 0777 &^ umask matches hf's own dir creation, see
+					// probeDownloadMode.
+					if err := os.MkdirAll(filepath.Dir(target), 0o777); err != nil {
 						continue
 					}
 					// Link first, verify after: every check runs on the
@@ -235,8 +285,18 @@ func seedFiles(files []lfsFile, siblings []string, modelDir string) (int, int64,
 					if err := os.Link(candidate, target); err != nil {
 						continue
 					}
-					if !seedTargetValid(target, file, buf) {
-						os.Remove(target)
+					if !seedTargetValid(target, file, mode, buf) {
+						// The one case where seeding must abort the wrap
+						// rather than degrade: an unverified file left in
+						// the target dir would be packed as if hf had
+						// produced it (hf trusts existing files when its
+						// metadata request fails), poisoning the artifact.
+						if rmErr := removeSeedTarget(target); rmErr != nil {
+							errOnce.Do(func() {
+								firstErr = fmt.Errorf("seeding left an unverified file it could not remove: %w; aborting to protect pack integrity", rmErr)
+							})
+							return
+						}
 						continue
 					}
 					results[t] = result{true, file.Size, filepath.Base(sibling)}
@@ -246,6 +306,9 @@ func seedFiles(files []lfsFile, siblings []string, modelDir string) (int, int64,
 		}()
 	}
 	wg.Wait()
+	if firstErr != nil {
+		return 0, 0, nil, firstErr
+	}
 
 	var linked int
 	var linkedBytes int64
@@ -263,15 +326,15 @@ func seedFiles(files []lfsFile, siblings []string, modelDir string) (int, int64,
 			sources = append(sources, filepath.Base(sibling))
 		}
 	}
-	return linked, linkedBytes, sources
+	return linked, linkedBytes, sources, nil
 }
 
 // seedTargetValid reports whether the freshly linked seed target is a
 // regular file with the expected mode and size whose full content hashes
 // to the expected SHA256.
-func seedTargetValid(target string, file lfsFile, buf []byte) bool {
+func seedTargetValid(target string, file lfsFile, mode os.FileMode, buf []byte) bool {
 	fi, err := os.Lstat(target)
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() != file.Size || fi.Mode().Perm() != seedFileMode {
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() != file.Size || fi.Mode().Perm() != mode {
 		return false
 	}
 	f, err := os.Open(target)
