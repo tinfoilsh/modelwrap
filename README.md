@@ -39,7 +39,7 @@ PRIVATE_MODEL_KEY_B64="${PRIVATE_MODEL_KEY_B64}" modelwrap --model-dir /path/to/
 - `--schema <N>`: pack schema, the frozen derivation from model bytes to image bytes (also `MODELWRAP_SCHEMA`; absent = default schema). See the pack schemas section of `SPEC.md`.
 - `--output <path>` / `--cache <path>`: output and download cache directories (default `./output`, `./cache`).
 - `--image <ref>`: override the packer container image the launcher runs (defaults to the release-pinned digest; also `MODELWRAP_IMAGE`).
-- `--local`: run the packer directly on the current machine instead of in a container. Artifact bytes then depend on locally installed tool versions.
+- `--local`: run the packer directly on the current machine instead of in a container. Requires the schema's pinned `mkfs.erofs` at its `/opt/modelwrap/schemas/` path (the packer refuses a PATH fallback: the schema names an exact toolchain).
 
 Set `HF_TOKEN` when accessing gated or private Hugging Face models; the launcher passes it into the container without exposing the value on the docker command line.
 
