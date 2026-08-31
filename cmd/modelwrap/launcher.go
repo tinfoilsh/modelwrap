@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 )
 
 // Fixed container-side paths the launcher rewrites host paths to. /cache
@@ -120,6 +121,9 @@ func dockerRunArgs(opts cliOptions) ([]string, error) {
 	}
 	if opts.Verify {
 		args = append(args, "--verify")
+	}
+	if opts.Schema != 0 {
+		args = append(args, "--schema", strconv.Itoa(opts.Schema))
 	}
 	if opts.Model != "" {
 		args = append(args, opts.Model)

@@ -2,9 +2,10 @@
 // EROFS images of model directories, wraps them with dm-verity (MWP), and
 // optionally encrypts them into a GPT disk image with dm-crypt (EMWP).
 //
-// It shells out to mkfs.erofs, sgdisk, and (for verification) veritysetup,
-// and is only intended to run inside the modelwrap container on Linux. The
-// dm-verity hash tree itself is built natively, in parallel.
+// It shells out to the pack schema's pinned mkfs.erofs, sgdisk, and (for
+// verification) veritysetup, and is only intended to run inside the
+// modelwrap container on Linux. The dm-verity hash tree itself is built
+// natively, in parallel.
 package wrap
 
 import (
@@ -18,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/tinfoilsh/modelwrap"
@@ -27,12 +29,14 @@ import (
 // Options configures a single packing run. Model is a Hugging Face model
 // ID, preferably name@revision. ModelDir packs a local directory instead
 // of downloading; if Model has no revision, the directory content hash is
-// used as the revision.
+// used as the revision. Schema selects the pack schema; 0 means
+// modelwrap.DefaultSchema.
 type Options struct {
 	Model     string
 	ModelDir  string
 	CacheDir  string
 	OutputDir string
+	Schema    int
 	Encrypt   bool
 	Verify    bool
 	KeyFile   string
@@ -53,6 +57,16 @@ func Pack(opts Options) (string, error) {
 			return "", err
 		}
 	}
+
+	schemaID := opts.Schema
+	if schemaID == 0 {
+		schemaID = modelwrap.DefaultSchema
+	}
+	schema, err := modelwrap.SchemaByID(schemaID)
+	if err != nil {
+		return "", err
+	}
+	fmt.Printf("Packing under schema %d (erofs-utils %s, %s)\n", schema.ID, schema.ErofsUtils, schema.Doc)
 
 	model, modelDir, err := resolveModel(opts)
 	if err != nil {
@@ -81,13 +95,20 @@ func Pack(opts Options) (string, error) {
 		return "", err
 	}
 
-	mwpFile := filepath.Join(outputModelDir, modelCommit+".mpk")
-	infoFile := filepath.Join(outputModelDir, modelCommit+".info")
+	base := filepath.Join(outputModelDir, modelCommit)
+	mwpFile := base + ".mpk"
+	infoFile := base + ".info"
 
-	if err := makeEROFS(model, modelDir, mwpFile); err != nil {
+	if err := ensureArtifactSchema(base, schema.ID); err != nil {
+		return "", err
+	}
+	if err := makeEROFS(schema, model, modelDir, mwpFile); err != nil {
 		return "", err
 	}
 	if err := formatVerity(model, mwpFile, infoFile); err != nil {
+		return "", err
+	}
+	if err := writeSchemaSidecar(base+".schema", schema.ID); err != nil {
 		return "", err
 	}
 
@@ -118,8 +139,8 @@ func Pack(opts Options) (string, error) {
 		HashOffset: ref.HashOffset,
 		UUID:       modelwrap.UUIDv5URL(model + "-emwp-outer"),
 	}
-	emwpFile := filepath.Join(outputModelDir, modelCommit+".emwp")
-	emwpInfoFile := filepath.Join(outputModelDir, modelCommit+".emwp.info")
+	emwpFile := base + ".emwp"
+	emwpInfoFile := base + ".emwp.info"
 
 	if _, err := os.Stat(emwpFile); os.IsNotExist(err) {
 		if err := encryptEMWP(mwpFile, emwpFile, emwpRef, masterKey); err != nil {
@@ -131,10 +152,11 @@ func Pack(opts Options) (string, error) {
 		fmt.Printf("Using existing EMWP artifact: %s\n", emwpFile)
 	}
 
-	if err := os.WriteFile(emwpInfoFile+".tmp", []byte(emwpRef.String()), 0644); err != nil {
+	emwpInfoTmp := tmpPath(emwpInfoFile)
+	if err := os.WriteFile(emwpInfoTmp, []byte(emwpRef.String()), 0644); err != nil {
 		return "", err
 	}
-	if err := os.Rename(emwpInfoFile+".tmp", emwpInfoFile); err != nil {
+	if err := os.Rename(emwpInfoTmp, emwpInfoFile); err != nil {
 		return "", err
 	}
 
@@ -236,28 +258,89 @@ func downloadModel(name, revision, dir, token string) error {
 	return run(cmd)
 }
 
-// makeEROFS builds the deterministic EROFS image if it does not exist.
-func makeEROFS(model, modelDir, mwpFile string) error {
+// ensureArtifactSchema fails when artifacts for this revision already
+// exist under a different pack schema: they are never silently reused or
+// overwritten, the operator must delete or move them aside deliberately.
+func ensureArtifactSchema(base string, want int) error {
+	exists := false
+	for _, suffix := range []string{".mpk", ".info", ".emwp", ".emwp.info"} {
+		if _, err := os.Stat(base + suffix); err == nil {
+			exists = true
+			break
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if !exists {
+		return nil
+	}
+	got, err := readSchemaSidecar(base + ".schema")
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("existing artifacts %s.* were packed under schema %d, but schema %d was requested: "+
+			"refusing to reuse or overwrite them; --delete the revision or move the artifacts aside to repack", base, got, want)
+	}
+	return nil
+}
+
+// readSchemaSidecar reads a <revision>.schema sidecar. A missing sidecar
+// means schema 1: every artifact packed before sidecars existed.
+func readSchemaSidecar(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	id, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || id < 1 {
+		return 0, fmt.Errorf("invalid schema sidecar %s: %q", path, data)
+	}
+	return id, nil
+}
+
+// writeSchemaSidecar records the resolved schema id next to the
+// artifacts: plain decimal, no newline, atomic like the info files.
+func writeSchemaSidecar(path string, id int) error {
+	tmp := tmpPath(path)
+	if err := os.WriteFile(tmp, []byte(strconv.Itoa(id)), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// tmpPath returns a process-unique temp sibling of path. Concurrent wraps
+// of the same revision (e.g. under different schemas: there is no
+// host-side dedup) must never interleave writes into one temp file; the
+// whole-file renames then make the last writer win loudly instead of
+// corrupting silently.
+func tmpPath(path string) string {
+	return fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
+}
+
+// makeEROFS builds the deterministic EROFS image with the schema's pinned
+// mkfs.erofs if it does not exist.
+func makeEROFS(schema modelwrap.PackSchema, model, modelDir, mwpFile string) error {
 	if _, err := os.Stat(mwpFile); err == nil {
 		fmt.Printf("Using existing EROFS image %s\n", mwpFile)
 		return nil
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	if _, err := os.Stat(schema.MkfsPath); err != nil {
+		return fmt.Errorf("schema %d mkfs.erofs not found at %s (run inside the packer image): %w", schema.ID, schema.MkfsPath, err)
+	}
 
-	fmt.Printf("Creating EROFS image %s\n", mwpFile)
-	err := run(exec.Command(
-		"mkfs.erofs",
-		"--all-root",
-		"-T0", // Zero timestamps
-		"-U"+modelwrap.UUIDv5URL(model+"-inner"), // Static filesystem UUID
-		mwpFile+".tmp",
-		modelDir,
-	))
-	if err != nil {
+	tmp := tmpPath(mwpFile)
+	args := schema.MkfsArgs(model, tmp, modelDir)
+	fmt.Printf("Creating EROFS image %s\n+ %s %s\n", mwpFile, schema.MkfsPath, strings.Join(args, " "))
+	if err := run(exec.Command(schema.MkfsPath, args...)); err != nil {
 		return err
 	}
-	return os.Rename(mwpFile+".tmp", mwpFile)
+	return os.Rename(tmp, mwpFile)
 }
 
 // formatVerity appends the dm-verity hash tree to the EROFS image and
@@ -303,10 +386,11 @@ func formatVerity(model, mwpFile, infoFile string) error {
 
 	// 0600 matches the mode veritysetup gave its --root-hash-file.
 	ref := fmt.Sprintf("%s_%d_%s", hex.EncodeToString(rootHash), offset, verityUUID)
-	if err := os.WriteFile(infoFile+".tmp", []byte(ref), 0600); err != nil {
+	tmp := tmpPath(infoFile)
+	if err := os.WriteFile(tmp, []byte(ref), 0600); err != nil {
 		return err
 	}
-	return os.Rename(infoFile+".tmp", infoFile)
+	return os.Rename(tmp, infoFile)
 }
 
 // encryptEMWP wraps an MWP file into a GPT disk image whose single
@@ -322,7 +406,7 @@ func encryptEMWP(mwpFile, emwpFile string, ref *modelwrap.ArtifactRef, masterKey
 	endSector := modelwrap.EMWPPartitionStartSector + sectors - 1
 	totalSectors := endSector + 1 + modelwrap.EMWPGPTTrailingSectors
 	diskUUID := modelwrap.UUIDv5URL(ref.RootHash + "-emwp-disk")
-	tmpFile := emwpFile + ".tmp"
+	tmpFile := tmpPath(emwpFile)
 
 	dmKey, err := modelwrap.DeriveKey(masterKey, ref)
 	if err != nil {
@@ -435,7 +519,7 @@ func VerifyEMWP(emwpFile, infoFile string, masterKey []byte, model string) error
 	}
 	defer clear(dmKey)
 
-	plainFile := emwpFile + ".verify.tmp"
+	plainFile := tmpPath(emwpFile + ".verify")
 	defer os.Remove(plainFile)
 	if err := decryptPayload(emwpFile, plainFile, fi.Size(), dmKey); err != nil {
 		return err

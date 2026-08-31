@@ -6,9 +6,24 @@ The trust assumptions are: artifact bytes are *untrusted*; at runtime, identity 
 
 Modelwrap's verifiability is based on *reproducibility*, not attested provenance: artifacts are bit-for-bit reproducible, and the Modelwrap root hash is derived deterministically. An auditor can independently recompute the root hash from the model weights, for example from a pinned Hugging Face revision.
 
-## Reproducibility and Packer Versioning
+## Reproducibility and Pack Schemas
 
-Artifact bytes, and therefore root hashes, are reproducible with respect to a specific digest-pinned packer image: the EROFS encoder and dm-verity tooling contribute to the output bytes, so a toolchain upgrade (e.g. a new `erofs-utils` version) can produce a different root hash for the same input model. This is not a format change and requires no version field in the artifact: existing artifacts remain valid and mountable because consumers act only on the attested reference, never on tool versions. An auditor recomputing a root hash must use the same packer image digest that produced the artifact.
+Artifact bytes, and therefore root hashes, are a deterministic function of the input bytes (`repo@revision`) and the *derivation*: file layout and ordering, the exact `mkfs.erofs` build and flags, and metadata normalization. A **pack schema** is a frozen, numbered specification of that derivation. Pack identity is `(repo@revision, schema) → root hash`, reproducible forever.
+
+The dm-verity parameters are **frozen across all schemas** (sha256, version 1, 4096-byte data and hash blocks, salt = `SHA256(<model identity>)`, UUIDv5 identifiers): a schema changes how bytes are *arranged*, never how they are *proven*. Consumers and the `<rootHash>_<hashOffset>_<uuid>` reference format are therefore schema-independent; adding a schema requires no consumer or format change, and artifacts carry no schema field.
+
+| Schema | Status | mkfs.erofs | Derivation |
+|---|---|---|---|
+| 1 | stable, **default** | erofs-utils 1.5-1 | alphabetical directory walk, `--all-root -T0 -U<uuidv5>`, single-threaded |
+| 2 | stable | erofs-utils 1.8.6-1 | same layout and normalization, `-b4096`, multithreaded mkfs (`--workers`) |
+
+*Stable* and *default* are independent properties. A stable schema is a permanent reproducibility contract: its output for a given input never changes, and it stays buildable indefinitely as the reproduction path for every artifact packed under it (enforced by a pinned-ref stability test per schema). The default is only which schema an unspecified wrap request resolves to; it deliberately lags newly added schemas and flips only as an explicit release decision once the newer schema is proven in production.
+
+The packer image vendors every schema's `mkfs.erofs` build side by side under `/opt/modelwrap/schemas/v<N>/`. Selection: the packer reads the `MODELWRAP_SCHEMA` environment variable (absent = default) and the CLI accepts `--schema N`; unknown ids are rejected. The resolved schema is printed in the wrap output and recorded next to the artifacts in a `<revision>.schema` sidecar (plain decimal, no newline, written atomically). Artifacts without a sidecar were packed under schema 1.
+
+Artifact paths are schema-agnostic: `<revision>.mpk`/`.info`/`.emwp` never encode the schema id, so consumers keep locating packs purely by `(repo, revision)`. A host therefore holds at most one schema's artifacts per `(repo, revision)`: existing artifacts satisfy a wrap request only under the same schema, and a request for a different schema fails loudly and never silently reuses or overwrites them (delete the revision's artifacts or move them aside to repack). Production schema hops happen at weights updates — a new revision and a new path — so the same-revision collision never arises outside testing and reproduction. The download cache holds input bytes and is schema-independent.
+
+An auditor recomputing a root hash must use the schema recorded for the artifact and the packer image digest that produced it.
 
 ## MWP Format
 

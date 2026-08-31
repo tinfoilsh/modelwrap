@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -25,12 +26,6 @@ const (
 	integrationModelRevision = "d6694b0d8fe17978761c9305dc151780506b192e"
 	integrationModel         = integrationModelName + "@" + integrationModelRevision
 
-	// integrationExpectedRef pins the full packed ref
-	// (rootHash_hashOffset_uuid) for integrationModel. If such a change is
-	// intentional, update this constant and treat it as a breaking change for
-	// every already-enrolled artifact hash.
-	integrationExpectedRef = "17c6605f3becf63a63da37cc6958b2d18f8abc750f9f546b9f57133db40c4326_2142208_9701bf21-6de2-59a2-bdea-141aaae05fc3"
-
 	// Tiny public model with two revisions that share LFS files:
 	// seedRevisionNew is the child of seedRevisionOld and only adds
 	// flax_model.msgpack, leaving pytorch_model.bin and tf_model.h5
@@ -39,6 +34,17 @@ const (
 	seedRevisionOld = "f42686d7a97d000446a173ab001673a12e156924"
 	seedRevisionNew = "5f91d94bd9cd7190a9f3216ff93cd1dd95f2c7be"
 )
+
+// integrationExpectedRefs pins the full packed EMWP ref
+// (rootHash_hashOffset_uuid) of integrationModel per pack schema. Every
+// entry is a frozen contract: a changed value means the schema's
+// derivation changed, which breaks reproducibility of every artifact hash
+// already enrolled under that schema. If a change is intentional it must
+// ship as a NEW schema id, never by editing an existing entry.
+var integrationExpectedRefs = map[int]string{
+	1: "17c6605f3becf63a63da37cc6958b2d18f8abc750f9f546b9f57133db40c4326_2142208_9701bf21-6de2-59a2-bdea-141aaae05fc3",
+	2: "e08ac80979ec407733e9958f6aefb4ccd015c79233ac62155d79db10b4ae1fd4_2142208_9701bf21-6de2-59a2-bdea-141aaae05fc3",
+}
 
 // TestEMWPRoundTripIntegration downloads and packs a tiny public model as
 // EMWP and then consumes it through the unwrap path: loop-mount the
@@ -76,12 +82,17 @@ func TestEMWPRoundTripIntegration(t *testing.T) {
 	if want := modelwrap.UUIDv5URL(integrationModel + "-emwp-outer"); ref.UUID != want {
 		t.Fatalf("EMWP PARTUUID = %s, want %s", ref.UUID, want)
 	}
-	// Check that the generated ref is still stable. If the ref changes, then
-	// the new version should be considered a breaking change.
-	if rawRef != integrationExpectedRef {
+	// Check that the generated ref is still stable. The default request
+	// must resolve to schema 1 and reproduce its frozen ref: a change here
+	// is a breaking change for every already-enrolled artifact hash.
+	if want := integrationExpectedRefs[1]; rawRef != want {
 		t.Fatalf("packed ref = %s, want %s\n"+
-			"The generated artifact changed. If a packer toolchain change was intentional, "+
-			"update integrationExpectedRef; otherwise find what changed in the container image.", rawRef, integrationExpectedRef)
+			"The generated artifact changed. Schema 1 is frozen: find what changed "+
+			"in the container image or the packer; an intentional derivation change must ship as a new schema.", rawRef, want)
+	}
+	sidecar := filepath.Join(work, "output", integrationModelName, integrationModelRevision+".schema")
+	if data, err := os.ReadFile(sidecar); err != nil || string(data) != "1" {
+		t.Fatalf("schema sidecar = %q, %v; want %q", data, err, "1")
 	}
 
 	emwpFile := filepath.Join(work, "output", integrationModelName, integrationModelRevision+".emwp")
@@ -139,6 +150,62 @@ func TestEMWPRoundTripIntegration(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(mountPoint, name)); err != nil {
 			t.Fatalf("checking mounted model file %s: %v", name, err)
 		}
+	}
+}
+
+// TestPackSchemaStability packs the tiny integration model under every
+// registered pack schema and checks each against its frozen pinned ref, so
+// a derivation drift in any schema's toolchain or invocation fails CI
+// loudly. It also proves the schema's toolchain actually engaged: schema 2
+// passes --workers, which only a multithreaded mkfs.erofs build accepts.
+// Needs network and the packer image toolchain (run via test/e2e.sh);
+// verification is userspace-only, no privilege required.
+func TestPackSchemaStability(t *testing.T) {
+	if os.Getenv("TINFOIL_MODELWRAP_INTEGRATION") != "1" {
+		t.Skip("set TINFOIL_MODELWRAP_INTEGRATION=1 to run")
+	}
+
+	for _, id := range modelwrap.SchemaIDs() {
+		t.Run(fmt.Sprintf("schema-%d", id), func(t *testing.T) {
+			want, ok := integrationExpectedRefs[id]
+			if !ok {
+				t.Fatalf("schema %d has no pinned ref: every registered schema needs a stability row", id)
+			}
+
+			work := t.TempDir()
+			masterKey := []byte(strings.Repeat("k", modelwrap.EMWPMasterKeyBytes))
+			keyFile := filepath.Join(work, "master.key")
+			if err := os.WriteFile(keyFile, []byte(base64.StdEncoding.EncodeToString(masterKey)), 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			ref, err := wrap.Pack(wrap.Options{
+				Model:     integrationModel,
+				Schema:    id,
+				CacheDir:  filepath.Join(work, "cache"),
+				OutputDir: filepath.Join(work, "output"),
+				Encrypt:   true,
+				Verify:    true,
+				KeyFile:   keyFile,
+			})
+			if err != nil {
+				t.Fatalf("packing under schema %d: %v", id, err)
+			}
+			if ref != want {
+				t.Fatalf("schema %d packed ref = %s, want pinned %s\n"+
+					"The schema's derivation changed; schemas are frozen. An intentional "+
+					"derivation change must ship as a new schema id.", id, ref, want)
+			}
+
+			sidecar := filepath.Join(work, "output", integrationModelName, integrationModelRevision+".schema")
+			data, err := os.ReadFile(sidecar)
+			if err != nil {
+				t.Fatalf("reading schema sidecar: %v", err)
+			}
+			if string(data) != strconv.Itoa(id) {
+				t.Fatalf("schema sidecar = %q, want %q", data, strconv.Itoa(id))
+			}
+		})
 	}
 }
 

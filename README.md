@@ -36,6 +36,7 @@ PRIVATE_MODEL_KEY_B64="${PRIVATE_MODEL_KEY_B64}" modelwrap --model-dir /path/to/
 - `--encrypt`: emit encrypted modelwrap output (`.emwp`). Requires a master key via `--key-file` or `PRIVATE_MODEL_KEY_B64`.
 - `--key-file <path>`: file containing the base64-encoded 64-byte EMWP master key.
 - `--verify`: optional. Runs `veritysetup verify` for MWP and decrypts then verifies EMWP, which is useful for cached artifacts or release checks.
+- `--schema <N>`: pack schema, the frozen derivation from model bytes to image bytes (also `MODELWRAP_SCHEMA`; absent = default schema). See the pack schemas section of `SPEC.md`.
 - `--output <path>` / `--cache <path>`: output and download cache directories (default `./output`, `./cache`).
 - `--image <ref>`: override the packer container image the launcher runs (defaults to the release-pinned digest; also `MODELWRAP_IMAGE`).
 - `--local`: run the packer directly on the current machine instead of in a container. Artifact bytes then depend on locally installed tool versions.
@@ -46,6 +47,7 @@ MWP mode emits:
 
 - `output/mistralai/Ministral-3-3B-Instruct-2512/cfcb068fa7c44114cf77a462357c6cdcd2c304b4.mpk`: dm-verity EROFS image
 - `output/mistralai/Ministral-3-3B-Instruct-2512/cfcb068fa7c44114cf77a462357c6cdcd2c304b4.info`: metadata file in the format `ROOTHASH_OFFSET_VERITYUUID`
+- `output/mistralai/Ministral-3-3B-Instruct-2512/cfcb068fa7c44114cf77a462357c6cdcd2c304b4.schema`: pack schema id the artifacts were produced under (absent = schema 1)
 
 EMWP mode additionally emits:
 
@@ -54,11 +56,11 @@ EMWP mode additionally emits:
 
 ## Supply Chain Pins
 
-The published image is built in two digest-pinned stages: a Go builder that compiles the `modelwrap` binary (`CGO_ENABLED=0`, `-trimpath`, hash-locked Go dependencies via `go.sum`), and a runtime image based on the official Python image on Debian Trixie that installs `erofs-utils`, `cryptsetup`, and `gdisk` from a dated `snapshot.debian.org` archive plus a hash-checked `requirements.txt` (only `huggingface_hub`, which provides the `hf` CLI used for downloads).
+The published image is built in two digest-pinned stages: a Go builder that compiles the `modelwrap` binary (`CGO_ENABLED=0`, `-trimpath`, hash-locked Go dependencies via `go.sum`), and a runtime image based on the official Python image on Debian Trixie that installs `cryptsetup` and `gdisk` from a dated `snapshot.debian.org` archive plus a hash-checked `requirements.txt` (only `huggingface_hub`, which provides the `hf` CLI used for downloads).
 
 The packer currently pins:
 
-- `erofs-utils=1.8.6-1`
+- per-schema `mkfs.erofs` builds vendored under `/opt/modelwrap/schemas/` from sha256-pinned debs of the dated snapshot archive: schema 1 = `erofs-utils 1.5-1`, schema 2 = `erofs-utils 1.8.6-1` (multithreaded)
 - `cryptsetup=2:2.7.5-2`
 - `gdisk=1.0.10-2`
 

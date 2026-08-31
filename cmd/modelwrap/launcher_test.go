@@ -27,6 +27,7 @@ func TestDockerRunArgs(t *testing.T) {
 			Model:    "org/model@rev",
 			ModelDir: "weights",
 			KeyFile:  "master.key",
+			Schema:   2,
 			Encrypt:  true,
 			Verify:   true,
 		},
@@ -48,6 +49,7 @@ func TestDockerRunArgs(t *testing.T) {
 		"--model-dir", "/model",
 		"--key-file", "/run/modelwrap-key",
 		"--encrypt", "--verify",
+		"--schema", "2",
 		"org/model@rev",
 	}
 	if !reflect.DeepEqual(got, want) {

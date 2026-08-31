@@ -35,11 +35,19 @@ func Delete(opts DeleteOptions) error {
 	base := filepath.Join(outputModelDir, revision)
 	var errs []error
 	for _, suffix := range []string{
-		".mpk", ".info", ".emwp", ".emwp.info",
+		".mpk", ".info", ".emwp", ".emwp.info", ".schema",
 		".mpk.tmp", ".info.tmp", ".emwp.tmp", ".emwp.info.tmp", ".emwp.verify.tmp",
 	} {
 		if err := os.Remove(base + suffix); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, fmt.Errorf("removing %s: %w", base+suffix, err))
+		}
+	}
+	// Process-unique temp leftovers (<artifact>.tmp.<pid>) from crashed runs.
+	if tmps, err := filepath.Glob(base + ".*.tmp.*"); err == nil {
+		for _, tmp := range tmps {
+			if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("removing %s: %w", tmp, err))
+			}
 		}
 	}
 
