@@ -226,6 +226,80 @@ func TestStagedPathUnique(t *testing.T) {
 	}
 }
 
+// TestDeleteWaitsForArtifactLock: every removal Delete performs — the
+// cache dir included, which a same-revision Pack reads during its locked
+// build — happens inside the revision lock hold, so a held lock stalls
+// the entire deletion.
+func TestDeleteWaitsForArtifactLock(t *testing.T) {
+	work := t.TempDir()
+	outputModelDir := filepath.Join(work, "output", "org", "model")
+	cacheRevisionDir := filepath.Join(work, "cache", "org", "model", "rev1")
+	if err := os.MkdirAll(outputModelDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cacheRevisionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(outputModelDir, "rev1.mpk"),
+		filepath.Join(outputModelDir, "rev1.info"),
+		filepath.Join(cacheRevisionDir, "weights.bin"),
+	} {
+		if err := os.WriteFile(path, []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	release, err := acquireArtifactLock(filepath.Join(outputModelDir, "rev1.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var released atomic.Bool
+	done := make(chan error, 1)
+	go func() {
+		err := Delete(DeleteOptions{
+			Model:     "org/model@rev1",
+			CacheDir:  filepath.Join(work, "cache"),
+			OutputDir: filepath.Join(work, "output"),
+		})
+		if err == nil && !released.Load() {
+			err = os.ErrInvalid // deletion ran while the lock was held
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Delete completed while the lock was held: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	// Nothing may be removed while the lock is held.
+	for _, path := range []string{
+		filepath.Join(outputModelDir, "rev1.mpk"),
+		filepath.Join(cacheRevisionDir, "weights.bin"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s removed while the lock was held: %v", path, err)
+		}
+	}
+
+	released.Store(true)
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("Delete after release: %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(outputModelDir, "rev1.mpk"),
+		filepath.Join(outputModelDir, "rev1.info"),
+		cacheRevisionDir,
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected %s removed after release, got %v", path, err)
+		}
+	}
+}
+
 // TestArtifactLockExcludes: a second acquirer of the same artifact lock
 // must not enter until the first releases.
 func TestArtifactLockExcludes(t *testing.T) {

@@ -33,36 +33,32 @@ func Delete(opts DeleteOptions) error {
 
 	outputModelDir := filepath.Join(opts.OutputDir, filepath.FromSlash(modelName))
 	base := filepath.Join(outputModelDir, revision)
-	var errs []error
-	if _, err := os.Stat(outputModelDir); err == nil {
-		errs = append(errs, deleteArtifacts(base)...)
-	} else if !os.IsNotExist(err) {
+	cacheRevisionDir := filepath.Join(opts.CacheDir, filepath.FromSlash(modelName), revision)
+
+	// One uninterrupted hold of the revision lock covers every removal,
+	// the cache included: a same-revision Pack reads the cache dir during
+	// its locked build, and ripping files out mid-mkfs would produce a
+	// silently wrong artifact, not an error. The dir is created so the
+	// lock always exists to take; pruneEmptyParents cleans it back up.
+	//
+	// The two writers outside the lock stay safe without it: a Pack still
+	// in its pre-lock download phase fails loudly (hf re-verifies files
+	// and errors on vanished paths, and mkfs refuses a missing dir once
+	// the Pack holds the lock), and cross-revision seeding FROM this
+	// cache links first and verifies the pinned target inode after, so a
+	// vanished source is an ENOENT skip and an already-linked file stays
+	// verified (see seedFromPreviousRevisions).
+	if err := os.MkdirAll(outputModelDir, 0755); err != nil {
+		return err
+	}
+	release, err := acquireArtifactLock(base + ".lock")
+	if err != nil {
 		return err
 	}
 
-	cacheRevisionDir := filepath.Join(opts.CacheDir, filepath.FromSlash(modelName), revision)
-	if err := os.RemoveAll(cacheRevisionDir); err != nil {
-		errs = append(errs, fmt.Errorf("removing %s: %w", cacheRevisionDir, err))
-	}
-
-	// Prune only empty parent directories. A non-empty directory simply means
-	// another revision/model still exists and is intentionally retained.
-	pruneEmptyParents(outputModelDir, opts.OutputDir)
-	pruneEmptyParents(filepath.Dir(cacheRevisionDir), opts.CacheDir)
-	return errors.Join(errs...)
-}
-
-// deleteArtifacts removes one revision's published artifacts under the
-// artifact lock, in the inverse of the publish order (.info first): a
-// deletion interrupted mid-way leaves a set the packer already refuses as
-// partial instead of one it would trust.
-func deleteArtifacts(base string) []error {
-	release, err := acquireArtifactLock(base + ".lock")
-	if err != nil {
-		return []error{err}
-	}
-	defer release()
-
+	// Published artifacts go in the inverse of the publish order (.info
+	// first): a deletion interrupted mid-way leaves a set the packer
+	// already refuses as partial instead of one it would trust.
 	var errs []error
 	for _, suffix := range []string{
 		".emwp.info", ".emwp", ".info", ".mpk", ".schema",
@@ -81,11 +77,20 @@ func deleteArtifacts(base string) []error {
 			}
 		}
 	}
+	if err := os.RemoveAll(cacheRevisionDir); err != nil {
+		errs = append(errs, fmt.Errorf("removing %s: %w", cacheRevisionDir, err))
+	}
 	// Safe while held: acquireArtifactLock re-checks the path after locking.
 	if err := os.Remove(base + ".lock"); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("removing %s: %w", base+".lock", err))
 	}
-	return errs
+	release()
+
+	// Prune only empty parent directories. A non-empty directory simply means
+	// another revision/model still exists and is intentionally retained.
+	pruneEmptyParents(outputModelDir, opts.OutputDir)
+	pruneEmptyParents(filepath.Dir(cacheRevisionDir), opts.CacheDir)
+	return errors.Join(errs...)
 }
 
 func splitPinnedModel(model string) (string, string, error) {
