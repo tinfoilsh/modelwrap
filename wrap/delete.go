@@ -58,7 +58,9 @@ func Delete(opts DeleteOptions) error {
 
 	// Published artifacts go in the inverse of the publish order (.info
 	// first): a deletion interrupted mid-way leaves a set the packer
-	// already refuses as partial instead of one it would trust.
+	// already refuses as partial instead of one it would trust. The fixed
+	// *.tmp names are exact-literal leftovers of pre-schema packer
+	// releases.
 	var errs []error
 	for _, suffix := range []string{
 		".emwp.info", ".emwp", ".info", ".mpk", ".schema",
@@ -68,10 +70,11 @@ func Delete(opts DeleteOptions) error {
 			errs = append(errs, fmt.Errorf("removing %s: %w", base+suffix, err))
 		}
 	}
-	// Staged leftovers (<revision><suffix>.tmp.<rand>) from crashed runs,
-	// matched by literal name comparison — never by glob, which would give
-	// pattern semantics to the user-supplied revision. Live runs hold the
-	// lock, so this can never unlink another job's temp file.
+	// Staged leftovers (<revision>..staged<suffix>.<rand>) from crashed
+	// runs, matched by literal name comparison — never by glob, which
+	// would give pattern semantics to the user-supplied revision. Live
+	// runs hold the lock, so this can never unlink another job's temp
+	// file.
 	if entries, err := os.ReadDir(outputModelDir); err != nil {
 		errs = append(errs, fmt.Errorf("listing %s: %w", outputModelDir, err))
 	} else {
@@ -102,16 +105,15 @@ func Delete(opts DeleteOptions) error {
 }
 
 // isStagedLeftover reports whether name is a staged temp file of exactly
-// this revision (the <revision><suffix>.tmp.<rand> shape stagedPath
-// creates), by literal string comparison only.
+// this revision (the <revision>..staged<suffix>.<rand> shape stagedPath
+// creates), by literal string comparison only. The grammar is unambiguous
+// by construction: revisions never contain ".." (git-invalid, and
+// splitPinnedModel rejects it), so the "..staged" token can only ever
+// terminate this exact revision — a suffix enumeration would let a dotted
+// revision like "foo.emwp" alias another revision's staged files.
 func isStagedLeftover(name, revision string) bool {
-	for _, suffix := range []string{".mpk", ".info", ".schema", ".emwp", ".emwp.info", ".emwp.verify"} {
-		prefix := revision + suffix + ".tmp."
-		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
-			return true
-		}
-	}
-	return false
+	prefix := revision + "..staged."
+	return strings.HasPrefix(name, prefix) && len(name) > len(prefix)
 }
 
 func splitPinnedModel(model string) (string, string, error) {
@@ -125,7 +127,12 @@ func splitPinnedModel(model string) (string, string, error) {
 	if strings.ContainsAny(model, `*?[`) {
 		return "", "", fmt.Errorf("invalid model %q: pattern metacharacters are not allowed", model)
 	}
-	if strings.Contains(revision, "/") || strings.Contains(revision, `\`) || revision == "." || revision == ".." {
+	// ".." never appears in a git refname; rejecting it keeps the staged
+	// file grammar (<revision>..staged<suffix>.<rand>) unambiguous.
+	if strings.Contains(revision, "..") {
+		return "", "", fmt.Errorf("invalid model revision %q: '..' is not allowed", revision)
+	}
+	if strings.Contains(revision, "/") || strings.Contains(revision, `\`) || revision == "." {
 		return "", "", fmt.Errorf("invalid model revision %q", revision)
 	}
 	for _, segment := range strings.Split(name, "/") {

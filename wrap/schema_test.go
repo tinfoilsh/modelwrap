@@ -198,14 +198,15 @@ func TestReadSchemaSidecar(t *testing.T) {
 // TestStagedPathUnique: staged temp files are created exclusively with
 // random names — two stagings of the same target never collide, even in
 // one process (the packer container always runs as pid 1, so PIDs cannot
-// provide uniqueness).
+// provide uniqueness) — and follow the <revision>..staged<suffix>.<rand>
+// grammar whose ".." anchor no revision can contain.
 func TestStagedPathUnique(t *testing.T) {
-	target := filepath.Join(t.TempDir(), "rev.mpk")
-	a, err := stagedPath(target, 0644)
+	base := filepath.Join(t.TempDir(), "rev")
+	a, err := stagedPath(base, ".mpk", 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := stagedPath(target, 0600)
+	b, err := stagedPath(base, ".mpk", 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,8 +214,12 @@ func TestStagedPathUnique(t *testing.T) {
 		t.Fatalf("stagedPath returned the same name twice: %s", a)
 	}
 	for path, mode := range map[string]os.FileMode{a: 0644, b: 0600} {
-		if !strings.HasPrefix(path, target+".tmp.") {
-			t.Fatalf("staged path %s does not extend %s.tmp.", path, target)
+		prefix := base + "..staged.mpk."
+		if !strings.HasPrefix(path, prefix) || len(path) == len(prefix) {
+			t.Fatalf("staged path %s does not extend %s", path, prefix)
+		}
+		if !isStagedLeftover(filepath.Base(path), "rev") {
+			t.Fatalf("Delete's matcher does not recognize staged path %s", path)
 		}
 		fi, err := os.Stat(path)
 		if err != nil {

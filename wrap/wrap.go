@@ -175,7 +175,7 @@ func Pack(opts Options) (string, error) {
 		fmt.Printf("Using existing EMWP artifact: %s\n", emwpFile)
 	}
 
-	if err := writeStaged(emwpInfoFile, []byte(emwpRef.String()), 0644); err != nil {
+	if err := writeStaged(base, ".emwp.info", []byte(emwpRef.String()), 0644); err != nil {
 		return "", err
 	}
 
@@ -346,15 +346,19 @@ func backfillSchemaSidecar(base string, id int) error {
 	if _, present, err := readSchemaSidecar(base + ".schema"); err != nil || present {
 		return err
 	}
-	return writeStaged(base+".schema", []byte(strconv.Itoa(id)), 0644)
+	return writeStaged(base, ".schema", []byte(strconv.Itoa(id)), 0644)
 }
 
-// stagedPath creates a unique empty temp sibling of path (path.tmp.<rand>)
-// with the given mode and returns its name. Uniqueness comes from
-// os.CreateTemp's exclusive create, never from the PID: the packer
-// container always runs as pid 1.
-func stagedPath(path string, mode os.FileMode) (string, error) {
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
+// stagedPath creates a unique empty temp file for the artifact base+suffix,
+// named <revision>..staged<suffix>.<rand>, with the given mode, and returns
+// its name. Uniqueness comes from os.CreateTemp's exclusive create, never
+// from the PID: the packer container always runs as pid 1. The ".." token
+// right after the revision makes the name grammar unambiguous — git
+// refnames forbid "..", so the first ".." in a filename always terminates
+// the revision (a suffix-based grammar would let a revision like
+// "foo.emwp" alias another revision's staged files).
+func stagedPath(base, suffix string, mode os.FileMode) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(base), filepath.Base(base)+"..staged"+suffix+".*")
 	if err != nil {
 		return "", err
 	}
@@ -370,9 +374,10 @@ func stagedPath(path string, mode os.FileMode) (string, error) {
 	return name, nil
 }
 
-// writeStaged atomically replaces path with data via a staged temp file.
-func writeStaged(path string, data []byte, mode os.FileMode) error {
-	tmp, err := stagedPath(path, mode)
+// writeStaged atomically replaces base+suffix with data via a staged temp
+// file.
+func writeStaged(base, suffix string, data []byte, mode os.FileMode) error {
+	tmp, err := stagedPath(base, suffix, mode)
 	if err != nil {
 		return err
 	}
@@ -380,7 +385,7 @@ func writeStaged(path string, data []byte, mode os.FileMode) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	return os.Rename(tmp, base+suffix)
 }
 
 // acquireArtifactLock takes an exclusive advisory flock on path,
@@ -442,7 +447,7 @@ func buildMWP(schema modelwrap.PackSchema, model, modelDir, base string) (string
 	if _, err := os.Stat(schema.MkfsPath); err != nil {
 		return "", "", fmt.Errorf("schema %d mkfs.erofs not found at %s (run inside the packer image): %w", schema.ID, schema.MkfsPath, err)
 	}
-	tmp, err := stagedPath(base+".mpk", 0644)
+	tmp, err := stagedPath(base, ".mpk", 0644)
 	if err != nil {
 		return "", "", err
 	}
@@ -492,7 +497,7 @@ func buildMWP(schema modelwrap.PackSchema, model, modelDir, base string) (string
 // last — it is the commit record, so any interrupted publish leaves a set
 // that checkExistingArtifacts refuses as partial rather than reuses.
 func publishArtifacts(base string, schemaID int, tmpMWP, ref string) error {
-	if err := writeStaged(base+".schema", []byte(strconv.Itoa(schemaID)), 0644); err != nil {
+	if err := writeStaged(base, ".schema", []byte(strconv.Itoa(schemaID)), 0644); err != nil {
 		return err
 	}
 	if err := testCrashAfter(".schema"); err != nil {
@@ -505,7 +510,7 @@ func publishArtifacts(base string, schemaID int, tmpMWP, ref string) error {
 		return err
 	}
 	// 0600 matches the mode veritysetup gave its --root-hash-file.
-	return writeStaged(base+".info", []byte(ref), 0600)
+	return writeStaged(base, ".info", []byte(ref), 0600)
 }
 
 // testCrashAfter simulates a crash between publish steps when the
@@ -537,7 +542,9 @@ func encryptEMWP(mwpFile, emwpFile string, ref *modelwrap.ArtifactRef, masterKey
 	}
 	defer clear(dmKey)
 
-	tmpFile, err := stagedPath(emwpFile, 0644)
+	// emwpFile is always base+".emwp" (see Pack), recovering the staged-name
+	// grammar's revision/suffix split.
+	tmpFile, err := stagedPath(strings.TrimSuffix(emwpFile, ".emwp"), ".emwp", 0644)
 	if err != nil {
 		return err
 	}
@@ -643,7 +650,7 @@ func VerifyEMWP(emwpFile, infoFile string, masterKey []byte, model string) error
 	}
 	defer clear(dmKey)
 
-	plainFile, err := stagedPath(emwpFile+".verify", 0600)
+	plainFile, err := stagedPath(strings.TrimSuffix(emwpFile, ".emwp"), ".emwp.verify", 0600)
 	if err != nil {
 		return err
 	}
