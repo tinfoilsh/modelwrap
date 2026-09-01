@@ -3,9 +3,10 @@ package wrap
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tinfoilsh/modelwrap"
 )
@@ -13,9 +14,10 @@ import (
 // validRef is a syntactically valid rootHash_hashOffset_uuid for fixtures.
 const validRef = "17c6605f3becf63a63da37cc6958b2d18f8abc750f9f546b9f57133db40c4326_2142208_9701bf21-6de2-59a2-bdea-141aaae05fc3"
 
-// packFixture creates a local model dir plus pre-existing output artifacts
-// for its revision, returning the pack options and the artifact base path.
-func packFixture(t *testing.T, sidecar string) (Options, string) {
+// packFixture creates a local model dir plus pre-existing output files for
+// its revision (suffix -> content), returning the pack options and the
+// artifact base path.
+func packFixture(t *testing.T, files map[string]string) (Options, string) {
 	t.Helper()
 	work := t.TempDir()
 	modelDir := filepath.Join(work, "model")
@@ -33,14 +35,8 @@ func packFixture(t *testing.T, sidecar string) (Options, string) {
 	if err := os.MkdirAll(filepath.Dir(base), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(base+".mpk", []byte("mpk"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(base+".info", []byte(validRef), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if sidecar != "" {
-		if err := os.WriteFile(base+".schema", []byte(sidecar), 0644); err != nil {
+	for suffix, content := range files {
+		if err := os.WriteFile(base+suffix, []byte(content), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -52,9 +48,17 @@ func packFixture(t *testing.T, sidecar string) (Options, string) {
 	}, base
 }
 
-// TestPackRejectsSchemaMismatch: existing artifacts satisfy a wrap request
-// only under the same schema; a different schema must fail loudly before
-// touching them, never silently return the other schema's ref.
+func completeSet(sidecar string) map[string]string {
+	files := map[string]string{".mpk": "mpk", ".info": validRef}
+	if sidecar != "" {
+		files[".schema"] = sidecar
+	}
+	return files
+}
+
+// TestPackRejectsSchemaMismatch: a complete artifact set satisfies a wrap
+// request only under the same schema; a different schema must fail loudly
+// before touching it, never silently return the other schema's ref.
 func TestPackRejectsSchemaMismatch(t *testing.T) {
 	for name, tc := range map[string]struct {
 		sidecar string
@@ -66,7 +70,7 @@ func TestPackRejectsSchemaMismatch(t *testing.T) {
 		"sidecar-1-request-2":       {sidecar: "1", request: 2},
 	} {
 		t.Run(name, func(t *testing.T) {
-			opts, base := packFixture(t, tc.sidecar)
+			opts, base := packFixture(t, completeSet(tc.sidecar))
 			opts.Schema = tc.request
 			_, err := Pack(opts)
 			if err == nil || !strings.Contains(err.Error(), "schema") {
@@ -81,9 +85,34 @@ func TestPackRejectsSchemaMismatch(t *testing.T) {
 	}
 }
 
-// TestPackReusesSameSchemaArtifacts: existing artifacts of the requested
-// schema are reused, and the resolved schema is recorded in the sidecar
-// (also backfilled for pre-sidecar schema-1 artifacts).
+// TestPackRejectsPartialArtifacts: any incomplete artifact set (missing
+// .mpk or .info) is refused loudly — never rebuilt over, never reused.
+func TestPackRejectsPartialArtifacts(t *testing.T) {
+	for name, files := range map[string]map[string]string{
+		"mpk-only":         {".mpk": "mpk"},
+		"info-only":        {".info": validRef},
+		"emwp-only":        {".emwp": "emwp"},
+		"mpk-with-sidecar": {".mpk": "mpk", ".schema": "1"},
+		"emwp-with-trioless-info": {
+			".emwp": "emwp", ".emwp.info": validRef, ".info": validRef,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts, _ := packFixture(t, files)
+			_, err := Pack(opts)
+			if err == nil || !strings.Contains(err.Error(), "partial artifact set") {
+				t.Fatalf("Pack = %v, want partial-artifact-set error", err)
+			}
+			if !strings.Contains(err.Error(), "--delete") {
+				t.Fatalf("partial-set error should instruct --delete: %v", err)
+			}
+		})
+	}
+}
+
+// TestPackReusesSameSchemaArtifacts: a complete set of the requested
+// schema is reused, and the schema is backfilled into the sidecar only for
+// pre-sidecar schema-1 artifacts.
 func TestPackReusesSameSchemaArtifacts(t *testing.T) {
 	for name, tc := range map[string]struct {
 		sidecar string
@@ -95,7 +124,7 @@ func TestPackReusesSameSchemaArtifacts(t *testing.T) {
 		"sidecar-2-request-2":        {sidecar: "2", request: 2},
 	} {
 		t.Run(name, func(t *testing.T) {
-			opts, base := packFixture(t, tc.sidecar)
+			opts, base := packFixture(t, completeSet(tc.sidecar))
 			opts.Schema = tc.request
 			ref, err := Pack(opts)
 			if err != nil {
@@ -119,8 +148,21 @@ func TestPackReusesSameSchemaArtifacts(t *testing.T) {
 	}
 }
 
+// TestCheckExistingArtifactsDanglingSidecar: a sidecar without any
+// artifacts records intent from an interrupted publish; it guards nothing
+// and must not block any schema.
+func TestCheckExistingArtifactsDanglingSidecar(t *testing.T) {
+	for _, request := range []int{1, 2} {
+		_, base := packFixture(t, map[string]string{".schema": "2"})
+		reuse, err := checkExistingArtifacts(base, request)
+		if err != nil || reuse {
+			t.Fatalf("dangling sidecar, request %d: (reuse=%v, err=%v), want (false, nil)", request, reuse, err)
+		}
+	}
+}
+
 func TestPackRejectsUnknownSchema(t *testing.T) {
-	opts, _ := packFixture(t, "")
+	opts, _ := packFixture(t, nil)
 	opts.Schema = 99
 	_, err := Pack(opts)
 	if err == nil || !strings.Contains(err.Error(), "unknown pack schema") {
@@ -128,35 +170,92 @@ func TestPackRejectsUnknownSchema(t *testing.T) {
 	}
 }
 
-func TestTmpPathProcessUnique(t *testing.T) {
-	got := tmpPath("/out/rev.mpk")
-	want := "/out/rev.mpk.tmp." + strconv.Itoa(os.Getpid())
-	if got != want {
-		t.Fatalf("tmpPath = %s, want %s", got, want)
-	}
-}
-
 func TestReadSchemaSidecar(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rev.schema")
 
-	if id, err := readSchemaSidecar(path); err != nil || id != 1 {
-		t.Fatalf("absent sidecar = (%d, %v), want (1, nil)", id, err)
+	if id, present, err := readSchemaSidecar(path); err != nil || present || id != 0 {
+		t.Fatalf("absent sidecar = (%d, %v, %v), want (0, false, nil)", id, present, err)
 	}
 	for content, want := range map[string]int{"1": 1, "2": 2, "2\n": 2} {
 		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if id, err := readSchemaSidecar(path); err != nil || id != want {
-			t.Fatalf("sidecar %q = (%d, %v), want (%d, nil)", content, id, err, want)
+		if id, present, err := readSchemaSidecar(path); err != nil || !present || id != want {
+			t.Fatalf("sidecar %q = (%d, %v, %v), want (%d, true, nil)", content, id, present, err, want)
 		}
 	}
 	for _, content := range []string{"", "x", "0", "-1", "1.5"} {
 		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if id, err := readSchemaSidecar(path); err == nil {
+		if id, _, err := readSchemaSidecar(path); err == nil {
 			t.Fatalf("sidecar %q = (%d, nil), want error", content, id)
 		}
+	}
+}
+
+// TestStagedPathUnique: staged temp files are created exclusively with
+// random names — two stagings of the same target never collide, even in
+// one process (the packer container always runs as pid 1, so PIDs cannot
+// provide uniqueness).
+func TestStagedPathUnique(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "rev.mpk")
+	a, err := stagedPath(target, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := stagedPath(target, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatalf("stagedPath returned the same name twice: %s", a)
+	}
+	for path, mode := range map[string]os.FileMode{a: 0644, b: 0600} {
+		if !strings.HasPrefix(path, target+".tmp.") {
+			t.Fatalf("staged path %s does not extend %s.tmp.", path, target)
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("staged file missing: %v", err)
+		}
+		if fi.Mode().Perm() != mode {
+			t.Fatalf("staged file %s mode = %v, want %v", path, fi.Mode().Perm(), mode)
+		}
+	}
+}
+
+// TestArtifactLockExcludes: a second acquirer of the same artifact lock
+// must not enter until the first releases.
+func TestArtifactLockExcludes(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "rev.lock")
+	release, err := acquireArtifactLock(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var released atomic.Bool
+	acquired := make(chan error, 1)
+	go func() {
+		release2, err := acquireArtifactLock(lockPath)
+		if err == nil {
+			if !released.Load() {
+				err = os.ErrInvalid // acquired while still held
+			}
+			release2()
+		}
+		acquired <- err
+	}()
+
+	select {
+	case err := <-acquired:
+		t.Fatalf("second acquire completed while the lock was held: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	released.Store(true)
+	release()
+	if err := <-acquired; err != nil {
+		t.Fatalf("second acquire after release: %v", err)
 	}
 }

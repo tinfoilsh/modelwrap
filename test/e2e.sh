@@ -39,7 +39,8 @@ docker run --rm \
 # consume with unwrap, reject/neutralize tampered superblocks. The
 # per-schema stability rows: every registered pack schema must reproduce
 # its frozen pinned ref (schema 1 = the pre-schema packer output, byte for
-# byte). Also the verity differential suite: the packer image ships the
+# byte). The publish crash-recovery and concurrent-wrap serialization
+# rules. Also the verity differential suite: the packer image ships the
 # pinned veritysetup the Go hash-tree builder must match byte for byte
 # (-test.short keeps the multi-GiB fixtures out of CI; the boundary cases
 # all run). And the download-seeding differential: a seeded wrap must be
@@ -49,7 +50,7 @@ docker run --rm --privileged \
   -e TINFOIL_MODELWRAP_INTEGRATION=1 \
   --entrypoint /tmp/modelwrap.test \
   "${IMAGE}" \
-  -test.run 'TestEMWPRoundTripIntegration|TestPackSchemaStability|TestEMWPGoEncryptKernelDecrypt|TestMWPSuperblockTamperIntegration|TestFormatVerityHashTreeDifferential|TestSeededWrapMatchesColdWrap' -test.short -test.v
+  -test.run 'TestEMWPRoundTripIntegration|TestPackSchemaStability|TestPackPublishCrashRecovery|TestPackConcurrentWrapsSerialize|TestEMWPGoEncryptKernelDecrypt|TestMWPSuperblockTamperIntegration|TestFormatVerityHashTreeDifferential|TestSeededWrapMatchesColdWrap' -test.short -test.v
 
 # CLI smoke test: the user-facing entrypoint with volumes and key file.
 # Packing is userspace-only, so it runs unprivileged.

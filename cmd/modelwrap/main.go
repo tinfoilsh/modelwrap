@@ -37,7 +37,7 @@ Flags:
   --encrypt           emit encrypted EMWP output (requires a master key)
   --key-file <path>   file containing the base64-encoded 64-byte EMWP master key
   --verify            verify artifacts after packing
-  --schema <N>        pack schema (default: latest stable; see SPEC.md)
+  --schema <N>        pack schema (default: 1; see SPEC.md)
   --output <path>     output directory (default ./output)
   --cache <path>      download cache directory (default ./cache)
   --image <ref>       packer container image to launch (default release-pinned)

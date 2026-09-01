@@ -34,21 +34,10 @@ func Delete(opts DeleteOptions) error {
 	outputModelDir := filepath.Join(opts.OutputDir, filepath.FromSlash(modelName))
 	base := filepath.Join(outputModelDir, revision)
 	var errs []error
-	for _, suffix := range []string{
-		".mpk", ".info", ".emwp", ".emwp.info", ".schema",
-		".mpk.tmp", ".info.tmp", ".emwp.tmp", ".emwp.info.tmp", ".emwp.verify.tmp",
-	} {
-		if err := os.Remove(base + suffix); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("removing %s: %w", base+suffix, err))
-		}
-	}
-	// Process-unique temp leftovers (<artifact>.tmp.<pid>) from crashed runs.
-	if tmps, err := filepath.Glob(base + ".*.tmp.*"); err == nil {
-		for _, tmp := range tmps {
-			if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
-				errs = append(errs, fmt.Errorf("removing %s: %w", tmp, err))
-			}
-		}
+	if _, err := os.Stat(outputModelDir); err == nil {
+		errs = append(errs, deleteArtifacts(base)...)
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 
 	cacheRevisionDir := filepath.Join(opts.CacheDir, filepath.FromSlash(modelName), revision)
@@ -61,6 +50,42 @@ func Delete(opts DeleteOptions) error {
 	pruneEmptyParents(outputModelDir, opts.OutputDir)
 	pruneEmptyParents(filepath.Dir(cacheRevisionDir), opts.CacheDir)
 	return errors.Join(errs...)
+}
+
+// deleteArtifacts removes one revision's published artifacts under the
+// artifact lock, in the inverse of the publish order (.info first): a
+// deletion interrupted mid-way leaves a set the packer already refuses as
+// partial instead of one it would trust.
+func deleteArtifacts(base string) []error {
+	release, err := acquireArtifactLock(base + ".lock")
+	if err != nil {
+		return []error{err}
+	}
+	defer release()
+
+	var errs []error
+	for _, suffix := range []string{
+		".emwp.info", ".emwp", ".info", ".mpk", ".schema",
+		".mpk.tmp", ".info.tmp", ".emwp.tmp", ".emwp.info.tmp", ".emwp.verify.tmp",
+	} {
+		if err := os.Remove(base + suffix); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("removing %s: %w", base+suffix, err))
+		}
+	}
+	// Staged leftovers (<artifact>.tmp.<rand>) from crashed runs. Live runs
+	// hold the lock, so the glob can never unlink another job's temp file.
+	if tmps, err := filepath.Glob(base + ".*.tmp.*"); err == nil {
+		for _, tmp := range tmps {
+			if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("removing %s: %w", tmp, err))
+			}
+		}
+	}
+	// Safe while held: acquireArtifactLock re-checks the path after locking.
+	if err := os.Remove(base + ".lock"); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("removing %s: %w", base+".lock", err))
+	}
+	return errs
 }
 
 func splitPinnedModel(model string) (string, string, error) {

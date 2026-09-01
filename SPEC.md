@@ -23,6 +23,8 @@ The packer image vendors every schema's `mkfs.erofs` build side by side under `/
 
 Artifact paths are schema-agnostic: `<revision>.mpk`/`.info`/`.emwp` never encode the schema id, so consumers keep locating packs purely by `(repo, revision)`. A host therefore holds at most one schema's artifacts per `(repo, revision)`: existing artifacts satisfy a wrap request only under the same schema, and a request for a different schema fails loudly and never silently reuses or overwrites them (delete the revision's artifacts or move them aside to repack). Production schema hops happen at weights updates — a new revision and a new path — so the same-revision collision never arises outside testing and reproduction. The download cache holds input bytes and is schema-independent.
 
+Writers are single-flight per `(model, revision)`: the packer and `--delete` hold an exclusive advisory lock on `<output>/<model>/<revision>.lock` for the entire build-and-publish (or deletion), serializing concurrent wraps of the same revision regardless of schema. A build happens entirely in exclusively-created staged temp files and is published by whole-file renames in the order `.schema` → `.mpk` → `.info`; deletion removes in the inverse order. The `.info` file is the commit record: a set missing `.mpk` or `.info` is refused as partial (never rebuilt over — `--delete` to repack), while a `.schema` sidecar without artifacts is a harmless remnant of an interrupted publish that blocks nothing.
+
 An auditor recomputing a root hash must use the schema recorded for the artifact and the packer image digest that produced it.
 
 ## MWP Format
