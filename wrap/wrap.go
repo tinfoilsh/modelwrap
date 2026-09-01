@@ -214,6 +214,9 @@ func resolveModel(opts Options) (model, modelDir string, err error) {
 		} else if !strings.Contains(model, "@") {
 			model = model + "@" + localRevision
 		}
+		if err := validateResolvedModel(model); err != nil {
+			return "", "", err
+		}
 		return model, opts.ModelDir, nil
 	}
 
@@ -228,7 +231,20 @@ func resolveModel(opts Options) (model, modelDir string, err error) {
 		fmt.Printf("Resolved %s default branch HEAD -> %s\n", model, sha)
 		model = model + "@" + sha
 	}
+	if err := validateResolvedModel(model); err != nil {
+		return "", "", err
+	}
 	return model, filepath.Join(opts.CacheDir, strings.Replace(model, "@", "/", 1)), nil
+}
+
+// validateResolvedModel gates every resolved model identity — explicit
+// user revisions included — through the same validation --delete
+// enforces, before Pack writes anything. Nothing can be packed that
+// deletion would later reject, and no revision can smuggle in the
+// staged-name grammar's ".." anchor.
+func validateResolvedModel(model string) error {
+	name, revision, _ := strings.Cut(model, "@")
+	return validatePinnedModel(name, revision)
 }
 
 // resolveHFRevision resolves the default branch HEAD commit of a Hugging

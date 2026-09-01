@@ -121,26 +121,39 @@ func splitPinnedModel(model string) (string, string, error) {
 	if !ok || name == "" || revision == "" {
 		return "", "", fmt.Errorf("model must be pinned as model@revision")
 	}
+	if err := validatePinnedModel(name, revision); err != nil {
+		return "", "", err
+	}
+	return name, revision, nil
+}
+
+// validatePinnedModel is the one gate for user-supplied model identities:
+// both the packer (before it writes anything) and --delete enforce it, so
+// nothing can be packed that deletion would later reject. Legitimate ids
+// pass trivially — HF names and git refnames forbid everything rejected
+// here, and hash-derived local revisions are plain hex.
+func validatePinnedModel(name, revision string) error {
 	// Pattern metacharacters never appear in legitimate model names or
-	// revisions (git refnames and HF ids forbid them); rejecting them
-	// keeps every path derived from user input free of glob semantics.
-	if strings.ContainsAny(model, `*?[`) {
-		return "", "", fmt.Errorf("invalid model %q: pattern metacharacters are not allowed", model)
+	// revisions; rejecting them keeps every path derived from user input
+	// free of glob semantics.
+	if strings.ContainsAny(name+revision, `*?[`) {
+		return fmt.Errorf("invalid model %q: pattern metacharacters are not allowed", name+"@"+revision)
 	}
 	// ".." never appears in a git refname; rejecting it keeps the staged
-	// file grammar (<revision>..staged<suffix>.<rand>) unambiguous.
+	// file grammar (<revision>..staged<suffix>.<rand>) unambiguous — a
+	// revision like "x..staged" would alias revision "x"'s staged files.
 	if strings.Contains(revision, "..") {
-		return "", "", fmt.Errorf("invalid model revision %q: '..' is not allowed", revision)
+		return fmt.Errorf("invalid model revision %q: '..' is not allowed", revision)
 	}
-	if strings.Contains(revision, "/") || strings.Contains(revision, `\`) || revision == "." {
-		return "", "", fmt.Errorf("invalid model revision %q", revision)
+	if strings.Contains(revision, "/") || strings.Contains(revision, `\`) || revision == "." || revision == "" {
+		return fmt.Errorf("invalid model revision %q", revision)
 	}
 	for _, segment := range strings.Split(name, "/") {
 		if segment == "" || segment == "." || segment == ".." || strings.Contains(segment, `\`) {
-			return "", "", fmt.Errorf("invalid model name %q", name)
+			return fmt.Errorf("invalid model name %q", name)
 		}
 	}
-	return name, revision, nil
+	return nil
 }
 
 func pruneEmptyParents(dir, stop string) {

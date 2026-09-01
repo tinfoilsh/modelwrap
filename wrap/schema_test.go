@@ -161,6 +161,73 @@ func TestCheckExistingArtifactsDanglingSidecar(t *testing.T) {
 	}
 }
 
+// TestPackRejectsInvalidRevision: Pack enforces the same model-identity
+// validation as --delete, before writing anything — otherwise it could
+// publish artifacts deletion refuses to touch, or (the sharp case) a
+// revision like "x..staged" whose published files alias revision "x"'s
+// staged-leftover grammar and would be removed by Delete("...@x").
+func TestPackRejectsInvalidRevision(t *testing.T) {
+	work := t.TempDir()
+	modelDir := filepath.Join(work, "model")
+	if err := os.MkdirAll(modelDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "weights.bin"), []byte("weights"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, tc := range map[string]struct {
+		model   string
+		wantErr string
+	}{
+		"dotdot":        {"mymodel@x..y", "'..' is not allowed"},
+		"staged-bypass": {"mymodel@x..staged", "'..' is not allowed"},
+		"metacharacter": {"mymodel@re*v", "metacharacters"},
+		"name-metachar": {"my[model]@rev", "metacharacters"},
+		"slash":         {"mymodel@a/b", "invalid model revision"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, withModelDir := range []bool{true, false} {
+				out := filepath.Join(t.TempDir(), "output")
+				cache := filepath.Join(t.TempDir(), "cache")
+				opts := Options{Model: tc.model, CacheDir: cache, OutputDir: out}
+				if withModelDir {
+					opts.ModelDir = modelDir
+				}
+				_, err := Pack(opts) // download path needs no network: rejected at resolve
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Pack(modelDir=%v) = %v, want error containing %q", withModelDir, err, tc.wantErr)
+				}
+				for _, dir := range []string{out, cache} {
+					entries, err := os.ReadDir(dir)
+					if err != nil {
+						t.Fatalf("reading %s: %v", dir, err)
+					}
+					if len(entries) != 0 {
+						t.Fatalf("rejected pack wrote into %s: %v", dir, entries)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestHashDerivedRevisionValid: local-directory revisions (HashDir output)
+// pass the shared validation trivially — hex only, no special-casing.
+func TestHashDerivedRevisionValid(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "weights.bin"), []byte("weights"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := modelwrap.HashDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validatePinnedModel("model", revision); err != nil {
+		t.Fatalf("hash-derived revision %q rejected: %v", revision, err)
+	}
+}
+
 func TestPackRejectsUnknownSchema(t *testing.T) {
 	opts, _ := packFixture(t, nil)
 	opts.Schema = 99
