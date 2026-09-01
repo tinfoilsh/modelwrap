@@ -68,12 +68,20 @@ func Delete(opts DeleteOptions) error {
 			errs = append(errs, fmt.Errorf("removing %s: %w", base+suffix, err))
 		}
 	}
-	// Staged leftovers (<artifact>.tmp.<rand>) from crashed runs. Live runs
-	// hold the lock, so the glob can never unlink another job's temp file.
-	if tmps, err := filepath.Glob(base + ".*.tmp.*"); err == nil {
-		for _, tmp := range tmps {
-			if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
-				errs = append(errs, fmt.Errorf("removing %s: %w", tmp, err))
+	// Staged leftovers (<revision><suffix>.tmp.<rand>) from crashed runs,
+	// matched by literal name comparison — never by glob, which would give
+	// pattern semantics to the user-supplied revision. Live runs hold the
+	// lock, so this can never unlink another job's temp file.
+	if entries, err := os.ReadDir(outputModelDir); err != nil {
+		errs = append(errs, fmt.Errorf("listing %s: %w", outputModelDir, err))
+	} else {
+		for _, entry := range entries {
+			if !isStagedLeftover(entry.Name(), revision) {
+				continue
+			}
+			path := filepath.Join(outputModelDir, entry.Name())
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("removing %s: %w", path, err))
 			}
 		}
 	}
@@ -93,10 +101,29 @@ func Delete(opts DeleteOptions) error {
 	return errors.Join(errs...)
 }
 
+// isStagedLeftover reports whether name is a staged temp file of exactly
+// this revision (the <revision><suffix>.tmp.<rand> shape stagedPath
+// creates), by literal string comparison only.
+func isStagedLeftover(name, revision string) bool {
+	for _, suffix := range []string{".mpk", ".info", ".schema", ".emwp", ".emwp.info", ".emwp.verify"} {
+		prefix := revision + suffix + ".tmp."
+		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func splitPinnedModel(model string) (string, string, error) {
 	name, revision, ok := strings.Cut(model, "@")
 	if !ok || name == "" || revision == "" {
 		return "", "", fmt.Errorf("model must be pinned as model@revision")
+	}
+	// Pattern metacharacters never appear in legitimate model names or
+	// revisions (git refnames and HF ids forbid them); rejecting them
+	// keeps every path derived from user input free of glob semantics.
+	if strings.ContainsAny(model, `*?[`) {
+		return "", "", fmt.Errorf("invalid model %q: pattern metacharacters are not allowed", model)
 	}
 	if strings.Contains(revision, "/") || strings.Contains(revision, `\`) || revision == "." || revision == ".." {
 		return "", "", fmt.Errorf("invalid model revision %q", revision)

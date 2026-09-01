@@ -56,6 +56,13 @@ type cliOptions struct {
 	delete bool
 }
 
+// invalidSchemaID rejects an explicitly selected schema id, identically
+// for both selection doors (the --schema flag and MODELWRAP_SCHEMA).
+func invalidSchemaID(source, value string) error {
+	fmt.Fprintf(os.Stderr, "invalid %s %q: expected a positive schema id\n", source, value)
+	return fmt.Errorf("invalid %s", source)
+}
+
 func main() {
 	opts, err := parseArgs(os.Args[1:])
 	if err != nil {
@@ -111,8 +118,7 @@ func parseArgs(args []string) (cliOptions, error) {
 	if v := os.Getenv("MODELWRAP_SCHEMA"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
-			fmt.Fprintf(os.Stderr, "invalid MODELWRAP_SCHEMA %q: expected a positive schema id\n", v)
-			return opts, fmt.Errorf("invalid MODELWRAP_SCHEMA")
+			return opts, invalidSchemaID("MODELWRAP_SCHEMA", v)
 		}
 		opts.Schema = n
 	}
@@ -131,6 +137,14 @@ func parseArgs(args []string) (cliOptions, error) {
 	fs.BoolVar(&opts.local, "local", false, "")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
+	}
+	// An explicitly passed --schema gets the same validation as the env
+	// door: both must accept and reject identical values (0 selecting the
+	// default silently would diverge from MODELWRAP_SCHEMA=0 erroring).
+	var schemaFlagSet bool
+	fs.Visit(func(f *flag.Flag) { schemaFlagSet = schemaFlagSet || f.Name == "schema" })
+	if schemaFlagSet && opts.Schema < 1 {
+		return opts, invalidSchemaID("--schema", strconv.Itoa(opts.Schema))
 	}
 
 	rest := fs.Args()

@@ -101,6 +101,46 @@ func TestDockerRunArgsPlainMWP(t *testing.T) {
 	}
 }
 
+// TestParseArgsSchemaValidation: the --schema flag and MODELWRAP_SCHEMA
+// are two doors to the same selection and must accept and reject
+// identical values; an explicit flag is validated even when it equals the
+// unset sentinel, and the flag overrides the env.
+func TestParseArgsSchemaValidation(t *testing.T) {
+	for name, tc := range map[string]struct {
+		env     string
+		args    []string
+		want    int
+		wantErr string
+	}{
+		"absent-both":        {want: 0},
+		"env-selects":        {env: "2", want: 2},
+		"flag-selects":       {args: []string{"--schema", "2"}, want: 2},
+		"flag-overrides-env": {env: "1", args: []string{"--schema", "2"}, want: 2},
+		"env-zero":           {env: "0", wantErr: "invalid MODELWRAP_SCHEMA"},
+		"env-negative":       {env: "-1", wantErr: "invalid MODELWRAP_SCHEMA"},
+		"env-garbage":        {env: "x", wantErr: "invalid MODELWRAP_SCHEMA"},
+		"flag-zero":          {args: []string{"--schema", "0"}, wantErr: "invalid --schema"},
+		"flag-negative":      {args: []string{"--schema", "-1"}, wantErr: "invalid --schema"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("MODELWRAP_SCHEMA", tc.env)
+			opts, err := parseArgs(append(tc.args, "org/model@rev"))
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("parseArgs err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseArgs: %v", err)
+			}
+			if opts.Schema != tc.want {
+				t.Fatalf("Schema = %d, want %d", opts.Schema, tc.want)
+			}
+		})
+	}
+}
+
 func TestDockerRunArgsDelete(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("HF_TOKEN", "")
