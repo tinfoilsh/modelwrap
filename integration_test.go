@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -25,12 +26,6 @@ const (
 	integrationModelRevision = "d6694b0d8fe17978761c9305dc151780506b192e"
 	integrationModel         = integrationModelName + "@" + integrationModelRevision
 
-	// integrationExpectedRef pins the full packed ref
-	// (rootHash_hashOffset_uuid) for integrationModel. If such a change is
-	// intentional, update this constant and treat it as a breaking change for
-	// every already-enrolled artifact hash.
-	integrationExpectedRef = "17c6605f3becf63a63da37cc6958b2d18f8abc750f9f546b9f57133db40c4326_2142208_9701bf21-6de2-59a2-bdea-141aaae05fc3"
-
 	// Tiny public model with two revisions that share LFS files:
 	// seedRevisionNew is the child of seedRevisionOld and only adds
 	// flax_model.msgpack, leaving pytorch_model.bin and tf_model.h5
@@ -39,6 +34,17 @@ const (
 	seedRevisionOld = "f42686d7a97d000446a173ab001673a12e156924"
 	seedRevisionNew = "5f91d94bd9cd7190a9f3216ff93cd1dd95f2c7be"
 )
+
+// integrationExpectedRefs pins the full packed EMWP ref
+// (rootHash_hashOffset_uuid) of integrationModel per pack schema. Every
+// entry is a frozen contract: a changed value means the schema's
+// derivation changed, which breaks reproducibility of every artifact hash
+// already enrolled under that schema. If a change is intentional it must
+// ship as a NEW schema id, never by editing an existing entry.
+var integrationExpectedRefs = map[int]string{
+	1: "17c6605f3becf63a63da37cc6958b2d18f8abc750f9f546b9f57133db40c4326_2142208_9701bf21-6de2-59a2-bdea-141aaae05fc3",
+	2: "e08ac80979ec407733e9958f6aefb4ccd015c79233ac62155d79db10b4ae1fd4_2142208_9701bf21-6de2-59a2-bdea-141aaae05fc3",
+}
 
 // TestEMWPRoundTripIntegration downloads and packs a tiny public model as
 // EMWP and then consumes it through the unwrap path: loop-mount the
@@ -76,12 +82,17 @@ func TestEMWPRoundTripIntegration(t *testing.T) {
 	if want := modelwrap.UUIDv5URL(integrationModel + "-emwp-outer"); ref.UUID != want {
 		t.Fatalf("EMWP PARTUUID = %s, want %s", ref.UUID, want)
 	}
-	// Check that the generated ref is still stable. If the ref changes, then
-	// the new version should be considered a breaking change.
-	if rawRef != integrationExpectedRef {
+	// Check that the generated ref is still stable. The default request
+	// must resolve to schema 1 and reproduce its frozen ref: a change here
+	// is a breaking change for every already-enrolled artifact hash.
+	if want := integrationExpectedRefs[1]; rawRef != want {
 		t.Fatalf("packed ref = %s, want %s\n"+
-			"The generated artifact changed. If a packer toolchain change was intentional, "+
-			"update integrationExpectedRef; otherwise find what changed in the container image.", rawRef, integrationExpectedRef)
+			"The generated artifact changed. Schema 1 is frozen: find what changed "+
+			"in the container image or the packer; an intentional derivation change must ship as a new schema.", rawRef, want)
+	}
+	sidecar := filepath.Join(work, "output", integrationModelName, integrationModelRevision+".schema")
+	if data, err := os.ReadFile(sidecar); err != nil || string(data) != "1" {
+		t.Fatalf("schema sidecar = %q, %v; want %q", data, err, "1")
 	}
 
 	emwpFile := filepath.Join(work, "output", integrationModelName, integrationModelRevision+".emwp")
@@ -140,6 +151,266 @@ func TestEMWPRoundTripIntegration(t *testing.T) {
 			t.Fatalf("checking mounted model file %s: %v", name, err)
 		}
 	}
+}
+
+// TestPackSchemaStability packs the tiny integration model under every
+// registered pack schema and checks each against its frozen pinned ref, so
+// a derivation drift in any schema's toolchain or invocation fails CI
+// loudly. It also proves the schema's toolchain actually engaged: schema 2
+// passes --workers, which only a multithreaded mkfs.erofs build accepts.
+// Needs network and the packer image toolchain (run via test/e2e.sh);
+// verification is userspace-only, no privilege required.
+func TestPackSchemaStability(t *testing.T) {
+	if os.Getenv("TINFOIL_MODELWRAP_INTEGRATION") != "1" {
+		t.Skip("set TINFOIL_MODELWRAP_INTEGRATION=1 to run")
+	}
+
+	for _, id := range modelwrap.SchemaIDs() {
+		t.Run(fmt.Sprintf("schema-%d", id), func(t *testing.T) {
+			want, ok := integrationExpectedRefs[id]
+			if !ok {
+				t.Fatalf("schema %d has no pinned ref: every registered schema needs a stability row", id)
+			}
+
+			work := t.TempDir()
+			masterKey := []byte(strings.Repeat("k", modelwrap.EMWPMasterKeyBytes))
+			keyFile := filepath.Join(work, "master.key")
+			if err := os.WriteFile(keyFile, []byte(base64.StdEncoding.EncodeToString(masterKey)), 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			ref, err := wrap.Pack(wrap.Options{
+				Model:     integrationModel,
+				Schema:    id,
+				CacheDir:  filepath.Join(work, "cache"),
+				OutputDir: filepath.Join(work, "output"),
+				Encrypt:   true,
+				Verify:    true,
+				KeyFile:   keyFile,
+			})
+			if err != nil {
+				t.Fatalf("packing under schema %d: %v", id, err)
+			}
+			if ref != want {
+				t.Fatalf("schema %d packed ref = %s, want pinned %s\n"+
+					"The schema's derivation changed; schemas are frozen. An intentional "+
+					"derivation change must ship as a new schema id.", id, ref, want)
+			}
+
+			sidecar := filepath.Join(work, "output", integrationModelName, integrationModelRevision+".schema")
+			data, err := os.ReadFile(sidecar)
+			if err != nil {
+				t.Fatalf("reading schema sidecar: %v", err)
+			}
+			if string(data) != strconv.Itoa(id) {
+				t.Fatalf("schema sidecar = %q, want %q", data, strconv.Itoa(id))
+			}
+		})
+	}
+}
+
+// crashTestModelDir writes a small deterministic local model directory, so
+// crash/concurrency tests need no network and produce comparable refs
+// across temp dirs (the revision is the directory content hash).
+func crashTestModelDir(t *testing.T, work string) string {
+	t.Helper()
+	modelDir := filepath.Join(work, "model")
+	if err := os.MkdirAll(modelDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("modelwrap crash and concurrency test\n"), 4096)
+	for _, name := range []string{"weights.bin", "config.json"} {
+		if err := os.WriteFile(filepath.Join(modelDir, name), payload, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return modelDir
+}
+
+// TestPackPublishCrashRecovery drives the publish crash seam
+// (MODELWRAP_TEST_CRASH_AFTER) through both windows between the publish
+// renames and checks the recovery rules: a dangling sidecar (crash after
+// .schema) blocks nothing, while a set missing .info (crash after .mpk) is
+// refused as partial until --delete. Needs the packer toolchain, no
+// network or privilege (run via test/e2e.sh).
+func TestPackPublishCrashRecovery(t *testing.T) {
+	if os.Getenv("TINFOIL_MODELWRAP_INTEGRATION") != "1" {
+		t.Skip("set TINFOIL_MODELWRAP_INTEGRATION=1 to run")
+	}
+
+	packOpts := func(work, modelDir string, schema int) wrap.Options {
+		return wrap.Options{
+			Model:     "crash-test",
+			ModelDir:  modelDir,
+			CacheDir:  filepath.Join(work, "cache"),
+			OutputDir: filepath.Join(work, "output"),
+			Schema:    schema,
+			Verify:    true,
+		}
+	}
+
+	// Control pack: the intact schema-1 ref every recovery must reproduce.
+	ctrlWork := t.TempDir()
+	ctrlRef, err := wrap.Pack(packOpts(ctrlWork, crashTestModelDir(t, ctrlWork), 1))
+	if err != nil {
+		t.Fatalf("control pack: %v", err)
+	}
+
+	// Crash window 1: after the sidecar publish. Only a dangling sidecar
+	// remains, which must not block a wrap under any schema.
+	work := t.TempDir()
+	modelDir := crashTestModelDir(t, work)
+	revision, err := modelwrap.HashDir(modelDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(work, "output", "crash-test", revision)
+
+	t.Setenv("MODELWRAP_TEST_CRASH_AFTER", ".schema")
+	if _, err := wrap.Pack(packOpts(work, modelDir, 2)); err == nil || !strings.Contains(err.Error(), "injected crash") {
+		t.Fatalf("crash-after-.schema pack = %v, want injected crash", err)
+	}
+	if data, err := os.ReadFile(base + ".schema"); err != nil || string(data) != "2" {
+		t.Fatalf("dangling sidecar = %q, %v; want %q", data, err, "2")
+	}
+	for _, suffix := range []string{".mpk", ".info"} {
+		if _, err := os.Stat(base + suffix); !os.IsNotExist(err) {
+			t.Fatalf("%s should not exist after sidecar-only crash: %v", base+suffix, err)
+		}
+	}
+	t.Setenv("MODELWRAP_TEST_CRASH_AFTER", "")
+	ref, err := wrap.Pack(packOpts(work, modelDir, 1))
+	if err != nil {
+		t.Fatalf("pack over dangling schema-2 sidecar: %v", err)
+	}
+	if ref != ctrlRef {
+		t.Fatalf("recovered ref = %s, want control %s", ref, ctrlRef)
+	}
+	if data, err := os.ReadFile(base + ".schema"); err != nil || string(data) != "1" {
+		t.Fatalf("sidecar after recovery = %q, %v; want %q", data, err, "1")
+	}
+
+	// Crash window 2: after the .mpk publish. The set is missing its
+	// commit record (.info) and must be refused as partial until deleted.
+	work2 := t.TempDir()
+	modelDir2 := crashTestModelDir(t, work2)
+	base2 := filepath.Join(work2, "output", "crash-test", revision)
+
+	t.Setenv("MODELWRAP_TEST_CRASH_AFTER", ".mpk")
+	if _, err := wrap.Pack(packOpts(work2, modelDir2, 1)); err == nil || !strings.Contains(err.Error(), "injected crash") {
+		t.Fatalf("crash-after-.mpk pack = %v, want injected crash", err)
+	}
+	t.Setenv("MODELWRAP_TEST_CRASH_AFTER", "")
+	if _, err := os.Stat(base2 + ".mpk"); err != nil {
+		t.Fatalf("expected published .mpk after crash: %v", err)
+	}
+	if _, err := os.Stat(base2 + ".info"); !os.IsNotExist(err) {
+		t.Fatalf(".info should not exist after mid-publish crash: %v", err)
+	}
+	if _, err := wrap.Pack(packOpts(work2, modelDir2, 1)); err == nil || !strings.Contains(err.Error(), "partial artifact set") {
+		t.Fatalf("pack over partial set = %v, want partial-artifact-set refusal", err)
+	}
+	if err := wrap.Delete(wrap.DeleteOptions{
+		Model:     "crash-test@" + revision,
+		CacheDir:  filepath.Join(work2, "cache"),
+		OutputDir: filepath.Join(work2, "output"),
+	}); err != nil {
+		t.Fatalf("delete after partial set: %v", err)
+	}
+	ref2, err := wrap.Pack(packOpts(work2, modelDir2, 1))
+	if err != nil {
+		t.Fatalf("pack after delete: %v", err)
+	}
+	if ref2 != ctrlRef {
+		t.Fatalf("repacked ref = %s, want control %s", ref2, ctrlRef)
+	}
+}
+
+// TestPackConcurrentWrapsSerialize packs the same revision under schema 1
+// and schema 2 concurrently: the artifact lock serializes them, so exactly
+// one publishes and the other fails loudly with the schema mismatch —
+// never a torn or mixed artifact set. Needs the packer toolchain, no
+// network or privilege (run via test/e2e.sh).
+func TestPackConcurrentWrapsSerialize(t *testing.T) {
+	if os.Getenv("TINFOIL_MODELWRAP_INTEGRATION") != "1" {
+		t.Skip("set TINFOIL_MODELWRAP_INTEGRATION=1 to run")
+	}
+
+	work := t.TempDir()
+	modelDir := crashTestModelDir(t, work)
+	revision, err := modelwrap.HashDir(modelDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(work, "output", "concurrent-test", revision)
+
+	type result struct {
+		schema int
+		ref    string
+		err    error
+	}
+	results := make(chan result, 2)
+	for _, id := range []int{1, 2} {
+		go func(id int) {
+			ref, err := wrap.Pack(wrap.Options{
+				Model:     "concurrent-test",
+				ModelDir:  modelDir,
+				CacheDir:  filepath.Join(work, "cache"),
+				OutputDir: filepath.Join(work, "output"),
+				Schema:    id,
+				Verify:    true,
+			})
+			results <- result{id, ref, err}
+		}(id)
+	}
+
+	winner := 0
+	var winnerRef string
+	for range 2 {
+		r := <-results
+		switch {
+		case r.err == nil:
+			if winner != 0 {
+				t.Fatalf("both concurrent wraps succeeded (schemas %d and %d): lock did not serialize", winner, r.schema)
+			}
+			winner, winnerRef = r.schema, r.ref
+		case strings.Contains(r.err.Error(), "were packed under schema"):
+			// The serialized loser: found the winner's artifacts.
+		default:
+			t.Fatalf("schema %d wrap failed unexpectedly: %v", r.schema, r.err)
+		}
+	}
+	if winner == 0 {
+		t.Fatal("no concurrent wrap succeeded")
+	}
+	if _, err := modelwrap.ParseRef(winnerRef); err != nil {
+		t.Fatalf("winner ref %q: %v", winnerRef, err)
+	}
+	if data, err := os.ReadFile(base + ".schema"); err != nil || string(data) != strconv.Itoa(winner) {
+		t.Fatalf("sidecar = %q, %v; want winner schema %d", data, err, winner)
+	}
+	if _, err := os.Stat(base + ".mpk"); err != nil {
+		t.Fatalf("winner .mpk missing: %v", err)
+	}
+	ref, err := parseInfoRef(filepath.Join(work, "output", "concurrent-test", revision+".info"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != winnerRef {
+		t.Fatalf("published info %s != winner ref %s", ref, winnerRef)
+	}
+}
+
+func parseInfoRef(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	ref, err := modelwrap.ParseRef(strings.TrimSpace(string(data)))
+	if err != nil {
+		return "", err
+	}
+	return ref.String(), nil
 }
 
 // TestEMWPGoEncryptKernelDecrypt is the authoritative compatibility test for

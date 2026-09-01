@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/tinfoilsh/modelwrap/wrap"
 )
@@ -36,6 +37,7 @@ Flags:
   --encrypt           emit encrypted EMWP output (requires a master key)
   --key-file <path>   file containing the base64-encoded 64-byte EMWP master key
   --verify            verify artifacts after packing
+  --schema <N>        pack schema (default: 1; see SPEC.md)
   --output <path>     output directory (default ./output)
   --cache <path>      download cache directory (default ./cache)
   --image <ref>       packer container image to launch (default release-pinned)
@@ -44,7 +46,7 @@ Flags:
 
 Environment fallbacks: MODEL, MODEL_DIR, VERIFY=1, ENCRYPTION=1, HF_TOKEN,
 PRIVATE_MODEL_KEY_FILE, PRIVATE_MODEL_KEY_B64, CACHE_DIR, OUTPUT_DIR,
-MODELWRAP_IMAGE.`
+MODELWRAP_SCHEMA, MODELWRAP_IMAGE.`
 
 // cliOptions extends the packer options with launcher-only settings.
 type cliOptions struct {
@@ -52,6 +54,13 @@ type cliOptions struct {
 	image  string
 	local  bool
 	delete bool
+}
+
+// invalidSchemaID rejects an explicitly selected schema id, identically
+// for both selection doors (the --schema flag and MODELWRAP_SCHEMA).
+func invalidSchemaID(source, value string) error {
+	fmt.Fprintf(os.Stderr, "invalid %s %q: expected a positive schema id\n", source, value)
+	return fmt.Errorf("invalid %s", source)
 }
 
 func main() {
@@ -104,6 +113,15 @@ func parseArgs(args []string) (cliOptions, error) {
 	if image := os.Getenv("MODELWRAP_IMAGE"); image != "" {
 		opts.image = image
 	}
+	// MODELWRAP_SCHEMA is the fixed selection contract with tinfoild:
+	// absent means the default schema.
+	if v := os.Getenv("MODELWRAP_SCHEMA"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return opts, invalidSchemaID("MODELWRAP_SCHEMA", v)
+		}
+		opts.Schema = n
+	}
 
 	fs := flag.NewFlagSet("modelwrap", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
@@ -112,12 +130,21 @@ func parseArgs(args []string) (cliOptions, error) {
 	fs.StringVar(&opts.OutputDir, "output", opts.OutputDir, "")
 	fs.StringVar(&opts.CacheDir, "cache", opts.CacheDir, "")
 	fs.StringVar(&opts.image, "image", opts.image, "")
+	fs.IntVar(&opts.Schema, "schema", opts.Schema, "")
 	fs.BoolVar(&opts.delete, "delete", false, "")
 	fs.BoolVar(&opts.Verify, "verify", opts.Verify, "")
 	fs.BoolVar(&opts.Encrypt, "encrypt", opts.Encrypt, "")
 	fs.BoolVar(&opts.local, "local", false, "")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
+	}
+	// An explicitly passed --schema gets the same validation as the env
+	// door: both must accept and reject identical values (0 selecting the
+	// default silently would diverge from MODELWRAP_SCHEMA=0 erroring).
+	var schemaFlagSet bool
+	fs.Visit(func(f *flag.Flag) { schemaFlagSet = schemaFlagSet || f.Name == "schema" })
+	if schemaFlagSet && opts.Schema < 1 {
+		return opts, invalidSchemaID("--schema", strconv.Itoa(opts.Schema))
 	}
 
 	rest := fs.Args()
