@@ -6,8 +6,6 @@
 package modelwrap
 
 import (
-	"crypto/hkdf"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -17,24 +15,6 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/mod/sumdb/dirhash"
-)
-
-// EMWP dm-crypt parameters.
-const (
-	EMWPCipher         = "aes-xts-plain64"
-	EMWPKeySizeBits    = 512
-	EMWPKeyBytes       = EMWPKeySizeBits / 8
-	EMWPMasterKeyBytes = 64
-	EMWPSectorSize     = 4096
-	EMWPKeyDeriveInfo  = "tinfoil/emwp/dm-crypt-key/v1"
-)
-
-// EMWP GPT disk image geometry. The encrypted payload partition starts at
-// a fixed sector so ciphertext placement is deterministic.
-const (
-	GPTSectorSize            = 512
-	EMWPPartitionStartSector = 2048
-	EMWPGPTTrailingSectors   = 40
 )
 
 var (
@@ -95,27 +75,6 @@ func (r *ArtifactRef) HashOffsetBytes() (uint64, error) {
 		return 0, fmt.Errorf("invalid hash offset %q: %w", r.HashOffset, err)
 	}
 	return offset, nil
-}
-
-// DeriveKey derives the per-artifact dm-crypt key from the EMWP master key
-// using HKDF-SHA256 with the artifact ID as salt.
-func DeriveKey(masterKey []byte, ref *ArtifactRef) ([]byte, error) {
-	if len(masterKey) != EMWPMasterKeyBytes {
-		return nil, fmt.Errorf("EMWP master key is %d bytes, want %d", len(masterKey), EMWPMasterKeyBytes)
-	}
-	return hkdf.Key(sha256.New, masterKey, []byte(ref.ArtifactID()), EMWPKeyDeriveInfo, EMWPKeyBytes)
-}
-
-// ParseMasterKey decodes and validates a base64-encoded EMWP master key.
-func ParseMasterKey(encoded string) ([]byte, error) {
-	key, err := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(encoded))
-	if err != nil {
-		return nil, fmt.Errorf("decoding EMWP master key as base64: %w", err)
-	}
-	if len(key) != EMWPMasterKeyBytes {
-		return nil, fmt.Errorf("EMWP master key decoded to %d bytes, want %d", len(key), EMWPMasterKeyBytes)
-	}
-	return key, nil
 }
 
 // UUIDv5URL computes the deterministic RFC 4122 version 5 UUID of name in

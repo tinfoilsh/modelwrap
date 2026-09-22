@@ -25,17 +25,14 @@ const (
 // device using the format's cipher parameters. The key file must contain
 // the raw per-artifact key derived with modelwrap.DeriveKey.
 func OpenCrypt(device, name, keyFile string) error {
-	cmd := exec.Command(
-		"cryptsetup", "open",
-		"--type", "plain",
-		"--cipher", modelwrap.EMWPCipher,
-		"--key-size", strconv.Itoa(modelwrap.EMWPKeySizeBits),
-		"--sector-size", strconv.Itoa(modelwrap.EMWPSectorSize),
+	args := append([]string{"open"}, modelwrap.CryptsetupArgs()...)
+	args = append(args,
 		"--key-file", keyFile,
 		"--readonly",
 		device,
 		name,
 	)
+	cmd := exec.Command("cryptsetup", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
